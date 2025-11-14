@@ -7,9 +7,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(MEMPOOL_ENABLE_SANITIZERS "Enable Address/UB sanitizers" OFF)
-option(MEMPOOL_ENABLE_TSAN       "Enable ThreadSanitizer" OFF)
-option(MEMPOOL_ENABLE_COVERAGE   "Enable coverage instrumentation" OFF)
+# By default, enable ASan/UBSan, but keep TSAN off (mutually exclusive).
+option(MEMPOOL_ENABLE_SANITIZERS "Enable Address/UB sanitizers (ASan+UBSan)" ON)
+option(MEMPOOL_ENABLE_TSAN       "Enable ThreadSanitizer (mutually exclusive with ASan/UBSan)" OFF)
+option(MEMPOOL_ENABLE_COVERAGE   "Enable coverage instrumentation" ON)
 
 # Common warning flags
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -21,29 +22,31 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # Sanitizers & coverage (host builds)
-if (MEMPOOL_ENABLE_SANITIZERS)
-    if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    # Make ASan/UBSan and TSAN mutually exclusive; they cannot be combined.
+    if (MEMPOOL_ENABLE_SANITIZERS AND MEMPOOL_ENABLE_TSAN)
+        message(FATAL_ERROR
+            "Cannot enable both MEMPOOL_ENABLE_SANITIZERS (ASan/UBSan) "
+            "and MEMPOOL_ENABLE_TSAN (TSAN). Please enable only one.")
+    endif()
+
+    set(SAN_FLAGS "")
+
+    if (MEMPOOL_ENABLE_TSAN)
+        message(STATUS "Enabling ThreadSanitizer")
+        set(SAN_FLAGS "-fsanitize=thread -fno-omit-frame-pointer")
+    elseif (MEMPOOL_ENABLE_SANITIZERS)
         message(STATUS "Enabling AddressSanitizer + UndefinedBehaviorSanitizer")
         set(SAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SAN_FLAGS}")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SAN_FLAGS}")
     endif()
-endif()
 
-if (MEMPOOL_ENABLE_TSAN)
-    if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-        message(STATUS "Enabling ThreadSanitizer")
-        set(TSAN_FLAGS "-fsanitize=thread -fno-omit-frame-pointer")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TSAN_FLAGS}")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TSAN_FLAGS}")
-    endif()
-endif()
+    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} ${SAN_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SAN_FLAGS}")
 
-if (MEMPOOL_ENABLE_COVERAGE)
-    if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    if (MEMPOOL_ENABLE_COVERAGE)
         message(STATUS "Enabling coverage flags")
         set(COV_FLAGS "--coverage -O0")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COV_FLAGS}")
+        set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} ${COV_FLAGS}")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COV_FLAGS}")
     endif()
 endif()

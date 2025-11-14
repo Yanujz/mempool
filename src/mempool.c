@@ -332,7 +332,9 @@ mempool_error_t mempool_get_stats(const mempool_t *pool,
 
     return MEMPOOL_OK;
 }
-
+/* cppcheck-suppress unusedFunction
+ * Public API; may be unused within this translation unit but used by external code.
+ */
 mempool_error_t mempool_reset(mempool_t *pool)
 {
     if (pool == NULL) {
@@ -369,6 +371,10 @@ mempool_error_t mempool_reset(mempool_t *pool)
     return MEMPOOL_OK;
 }
 
+
+/* cppcheck-suppress unusedFunction
+ * Public API; may be unused within this translation unit but used by external code.
+ */
 bool mempool_contains(const mempool_t *pool, const void *ptr)
 {
     if ((pool == NULL) || (ptr == NULL) || !pool->initialized) {
@@ -421,6 +427,9 @@ const char *mempool_strerror(mempool_error_t error)
     return msg;
 }
 
+/* cppcheck-suppress unusedFunction
+ * Public API; may be unused within this translation unit but used by external code.
+ */
 mempool_error_t mempool_set_sync(mempool_t      *pool,
                                  mempool_lock_fn lock,
                                  mempool_unlock_fn unlock,
