@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
   build-and-test:
@@ -16,6 +18,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake gcc g++ cppcheck
+          python3 -m pip install --upgrade pip
+          python3 -m pip install mkdocs
 
       - name: Configure (Debug, sanitizers + coverage)
         run: |
@@ -42,3 +46,14 @@ jobs:
             --error-exitcode=1 \
             -Iinclude \
             src/ tests/*.c examples/*.c
+
+      - name: Build documentation (MkDocs)
+        run: |
+          mkdocs build -f mkdocs/mkdocs.yml --strict
+
+      - name: Deploy documentation (MkDocs → GitHub Pages)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdocs gh-deploy -f mkdocs/mkdocs.yml --force
