@@ -18,6 +18,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake gcc g++ cppcheck
+          python3 -m pip install --upgrade pip
+          python3 -m pip install mkdocs
 
       - name: Configure (Debug, sanitizers + coverage)
         run: |
@@ -44,3 +46,7 @@ jobs:
             --error-exitcode=1 \
             -Iinclude \
             src/ tests/*.c examples/*.c
+
+      - name: Build documentation (MkDocs)
+        run: |
+          mkdocs build -f mkdocs/mkdocs.yml --strict
