@@ -1,6 +1,6 @@
 # Memory Pool Library for Embedded
 
-[![CI](https://github.com/Yanujz/mempool/actions/workflows/ci.yml/badge.svg)](https://github.com/Yanujz/mempool/actions/workflows/ci.yml)
+[![CI](https://github.com/Yanujz/mempool/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Yanujz/mempool/actions/workflows/ci.yml?query=branch%3Amain)
 [![Coverage](https://codecov.io/gh/Yanujz/mempool/branch/main/graph/badge.svg)](https://codecov.io/gh/Yanujz/mempool)
 ![Static Analysis](https://img.shields.io/badge/cppcheck-passing-brightgreen.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
