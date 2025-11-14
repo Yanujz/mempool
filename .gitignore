@@ -1,0 +1,52 @@
+build/
+Build/
+build-debug/
+build-release/
+
+# CMake and Make build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+
+# Compiled object files
+*.o
+
+# Compiled libraries
+*.a
+*.so
+*.dylib
+*.lib
+*.dll
+
+# Compiled executables
+*.exe
+*.out
+
+# Specific executable from the example
+/example/example
+
+# Debug symbols
+*.pdb
+*.idb
+
+# ===================================================================
+# OS-specific files
+# ===================================================================
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# ===================================================================
+# IDE and Editor files
+# ===================================================================
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+#*#
