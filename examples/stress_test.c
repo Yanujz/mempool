@@ -1,22 +1,32 @@
 #include <stdio.h>
 #include <stdint.h>
-
 #include "mempool.h"
 
 #define TEST_ALIGNMENT 8U
 
+static uint8_t state_buf[MEMPOOL_STATE_SIZE] __attribute__((aligned(TEST_ALIGNMENT)));
+static uint8_t pool_buf[8192U]               __attribute__((aligned(TEST_ALIGNMENT)));
+
 int main(void)
 {
-    uint8_t buffer[8192] __attribute__((aligned(TEST_ALIGNMENT)));
-    mempool_t pool;
+    mempool_t *pool = NULL;
+    mempool_error_t err;
     void *blocks[100];
     uint32_t i;
     uint32_t cycle;
 
     printf("=== Stress Test Example ===\n");
 
-    if (mempool_init(&pool, buffer, sizeof(buffer), 64U, TEST_ALIGNMENT) != MEMPOOL_OK) {
-        printf("Failed to initialize pool\n");
+    if (mempool_state_size() > sizeof(state_buf)) {
+        printf("State buffer too small for this build\n");
+        return 1;
+    }
+
+    err = mempool_init(state_buf, sizeof(state_buf),
+                       pool_buf, sizeof(pool_buf),
+                       64U, TEST_ALIGNMENT, &pool);
+    if (err != MEMPOOL_OK) {
+        printf("mempool_init failed: %s\n", mempool_strerror(err));
         return 1;
     }
 
@@ -26,25 +36,23 @@ int main(void)
 
     for (cycle = 0U; cycle < 10U; cycle++) {
         for (i = 0U; i < 100U; i++) {
-            if (mempool_alloc(&pool, &blocks[i]) != MEMPOOL_OK) {
+            if (mempool_alloc(pool, &blocks[i]) != MEMPOOL_OK) {
                 blocks[i] = NULL;
             }
         }
 
         for (i = 0U; i < 100U; i++) {
             if (blocks[i] != NULL) {
-                (void)mempool_free(&pool, blocks[i]);
+                (void)mempool_free(pool, blocks[i]);
                 blocks[i] = NULL;
             }
         }
     }
 
-    {
-        mempool_stats_t stats;
-        (void)mempool_get_stats(&pool, &stats);
-        printf("Stress test complete. Used blocks: %u, alloc_count: %u, free_count: %u\n",
-               stats.used_blocks, stats.alloc_count, stats.free_count);
-    }
+    mempool_stats_t stats;
+    (void)mempool_get_stats(pool, &stats);
+    printf("Stress test complete. Used blocks: %u, alloc_count: %u, free_count: %u\n",
+           stats.used_blocks, stats.alloc_count, stats.free_count);
 
     return 0;
 }
