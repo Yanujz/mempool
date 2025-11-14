@@ -50,3 +50,10 @@ jobs:
       - name: Build documentation (MkDocs)
         run: |
           mkdocs build -f mkdocs/mkdocs.yml --strict
+
+      - name: Deploy documentation (MkDocs → GitHub Pages)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdocs gh-deploy -f mkdocs/mkdocs.yml --force
