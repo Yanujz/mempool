@@ -1,4 +1,15 @@
-# MISRA-Friendly Mempool Library (Opaque, Two-Buffer Design)
+# Memory Pool Library for Embedded
+
+[![CI](https://github.com/Yanujz/mempool/actions/workflows/ci.yml/badge.svg)](https://github.com/Yanujz/mempool/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/Yanujz/mempool/branch/main/graph/badge.svg)](https://codecov.io/gh/Yanujz/mempool)
+![Static Analysis](https://img.shields.io/badge/cppcheck-passing-brightgreen.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Language: C11](https://img.shields.io/badge/language-C11-blue.svg)
+![Build: CMake](https://img.shields.io/badge/build-CMake-informational.svg)
+![Tests: GoogleTest](https://img.shields.io/badge/tests-GoogleTest-success.svg)
+![Sanitizers](https://img.shields.io/badge/sanitizers-ASan%20%7C%20UBSan%20%7C%20TSan-informational.svg)
+
+
 
 This repository contains a small, deterministic memory pool library in C,
 designed for embedded and safety-related systems.
@@ -56,7 +67,7 @@ void init_my_pool(void)
 
     /* store pool somewhere, or pass it to other subsystems */
 }
-```
+````
 
 See `examples/` for more complete programs.
 
@@ -73,10 +84,10 @@ ctest
 
 This builds:
 
-- `libmempool.a`
-- `mempool_ctest` (C harness)
-- `mempool_gtest` (GoogleTest suite)
-- Examples: `example_basic`, `example_embedded`, `example_stress`
+* `libmempool.a`
+* `mempool_ctest` (C harness)
+* `mempool_gtest` (GoogleTest suite)
+* Examples: `example_basic`, `example_embedded`, `example_stress`
 
 ### Using Make
 
@@ -91,21 +102,20 @@ make examples  # builds example binaries
 This repo contains documents and placeholders to help integrate the library
 into a safety case:
 
-- `docs/requirements.md` – functional & safety-related requirements.
-- `docs/traceability.md` – high-level mapping from requirements to code and tests.
-- `docs/safety/safety_manual.md` – integration guidelines and assumptions.
-- `docs/safety/dev_plan.md` – suggested development & verification activities using free tools.
-- `docs/safety/verification_report_template.md` – template to record results per release.
+* `docs/requirements.md` – functional & safety-related requirements.
+* `docs/traceability.md` – high-level mapping from requirements to code and tests.
+* `docs/safety/safety_manual.md` – integration guidelines and assumptions.
+* `docs/safety/dev_plan.md` – suggested development & verification activities using free tools.
+* `docs/safety/verification_report_template.md` – template to record results per release.
 
 ### Suggested Free Toolchain
 
-- **Compiler warnings**: GCC/Clang with strict flags.
-- **Static analysis**: `cppcheck`, `clang-tidy` (where available).
-- **Dynamic analysis**: sanitizers (`-fsanitize=address,undefined,thread`) on host.
-- **Coverage**: `gcov`/`lcov` or `llvm-cov` on host.
+* **Compiler warnings**: GCC/Clang with strict flags.
+* **Static analysis**: `cppcheck`, `clang-tidy` (where available).
+* **Dynamic analysis**: sanitizers (`-fsanitize=address,undefined,thread`) on host.
+* **Coverage**: `gcov`/`lcov` or `llvm-cov` on host.
 
 The actual commands and configurations are described in `docs/safety/dev_plan.md`.
 
 ## License
-
-MIT. See `LICENSE`.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
