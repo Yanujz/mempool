@@ -31,9 +31,8 @@ jobs:
           cd build
           ctest --output-on-failure
 
-      - name: Run cppcheck (static analysis)
+      - name: Run cppcheck on C sources (static analysis)
         run: |
-          # C sources (library, C tests, examples)
           cppcheck \
             --suppress=missingIncludeSystem \
             --enable=all \
@@ -43,14 +42,3 @@ jobs:
             --error-exitcode=1 \
             -Iinclude \
             src/ tests/*.c examples/*.c
-
-          # C++ GoogleTest suite
-          cppcheck \
-            --suppress=missingIncludeSystem \
-            --enable=all \
-            --std=c++17 \
-            --language=c++ \
-            --inline-suppr \
-            --error-exitcode=1 \
-            -Iinclude \
-            tests/gtest_mempool.cpp

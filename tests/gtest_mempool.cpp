@@ -10,6 +10,29 @@ extern "C" {
 #include "mempool.h"
 }
 
+// When running under Cppcheck, gtest headers are not parsed (system headers),
+// so TEST/EXPECT/ASSERT macros are unknown and cause syntax errors.
+// We stub them out so the file is syntactically valid for analysis.
+#ifdef __CPPCHECK__
+#define TEST(test_case_name, test_name) \
+    void test_case_name##_##test_name(void)
+
+#define EXPECT_EQ(...)    ((void)0)
+#define EXPECT_NE(...)    ((void)0)
+#define EXPECT_GT(...)    ((void)0)
+#define EXPECT_GE(...)    ((void)0)
+#define EXPECT_LE(...)    ((void)0)
+#define EXPECT_TRUE(...)  ((void)0)
+#define EXPECT_FALSE(...) ((void)0)
+#define EXPECT_STRNE(...) ((void)0)
+
+#define ASSERT_EQ(...)    ((void)0)
+#define ASSERT_NE(...)    ((void)0)
+#define ASSERT_TRUE(...)  ((void)0)
+#define ASSERT_FALSE(...) ((void)0)
+#define ASSERT_LE(...)    ((void)0)
+#endif
+
 namespace {
 
 constexpr std::size_t TEST_ALIGN = 8U;
