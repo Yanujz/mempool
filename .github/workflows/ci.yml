@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc g++ cppcheck
+
+      - name: Configure (Debug, sanitizers + coverage)
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug \
+                -DMEMPOOL_ENABLE_SANITIZERS=ON \
+                -DMEMPOOL_ENABLE_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build -- -j$(nproc)
+
+      - name: Run tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run cppcheck (static analysis)
+        run: |
+          cppcheck --enable=all --std=c11 --inline-suppr \
+                   --error-exitcode=1 \
+                   src/ tests/ examples/ include/
