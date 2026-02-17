@@ -14,8 +14,8 @@ option(MEMPOOL_ENABLE_COVERAGE   "Enable coverage instrumentation" ON)
 
 # Library feature toggles (passed as compile definitions)
 option(MEMPOOL_OPT_STATS            "Enable statistics tracking"      ON)
-option(MEMPOOL_OPT_SYNC             "Enable synchronization hooks"    ON)
 option(MEMPOOL_OPT_DOUBLE_FREE_CHK  "Enable double-free detection"    ON)
+option(MEMPOOL_OPT_STRERROR         "Enable mempool_strerror()"       ON)
 
 # Common warning flags
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -64,8 +64,8 @@ target_include_directories(mempool PUBLIC
 )
 target_compile_definitions(mempool PUBLIC
     MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
-    MEMPOOL_ENABLE_SYNC=$<BOOL:${MEMPOOL_OPT_SYNC}>
     MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
+    MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
 )
 
 # C test harness
@@ -101,12 +101,22 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 add_executable(mempool_gtest
+    src/mempool.c
     tests/gtest_mempool.cpp
 )
-target_include_directories(mempool_gtest PRIVATE include)
+target_include_directories(mempool_gtest PRIVATE include tests)
+target_compile_definitions(mempool_gtest PRIVATE
+    MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
+    MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+)
+target_compile_options(mempool_gtest PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+)
 target_link_libraries(mempool_gtest
     PRIVATE
-        mempool
         GTest::gtest_main
 )
 
