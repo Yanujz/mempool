@@ -7,13 +7,12 @@ extern "C" {
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #include "mempool_cfg.h"
 
 /* Version info */
 #define MEMPOOL_VERSION_MAJOR 0
-#define MEMPOOL_VERSION_MINOR 2
+#define MEMPOOL_VERSION_MINOR 3
 #define MEMPOOL_VERSION_PATCH 0
 
 /* Error codes */
@@ -28,20 +27,7 @@ typedef enum {
     MEMPOOL_ERR_NOT_INITIALIZED = 7
 } mempool_error_t;
 
-#if MEMPOOL_ENABLE_SYNC
-/* Optional synchronization callbacks */
-typedef void (*mempool_lock_fn)(void *user_ctx);
-typedef void (*mempool_unlock_fn)(void *user_ctx);
-
-typedef struct {
-    mempool_lock_fn   lock;
-    mempool_unlock_fn unlock;
-    void             *user_ctx;
-} mempool_sync_t;
-#endif /* MEMPOOL_ENABLE_SYNC */
-
 #if MEMPOOL_ENABLE_STATS
-/* Statistics */
 typedef struct {
     uint32_t total_blocks;
     uint32_t used_blocks;
@@ -51,7 +37,7 @@ typedef struct {
     uint32_t free_count;
     uint32_t block_size;
 } mempool_stats_t;
-#endif /* MEMPOOL_ENABLE_STATS */
+#endif
 
 /* Opaque pool handle */
 typedef struct mempool mempool_t;
@@ -71,19 +57,15 @@ mempool_error_t mempool_init(
 mempool_error_t mempool_alloc(mempool_t *pool, void **block);
 mempool_error_t mempool_free(mempool_t *pool, void *block);
 mempool_error_t mempool_reset(mempool_t *pool);
-bool mempool_contains(const mempool_t *pool, const void *ptr);
-const char *mempool_strerror(mempool_error_t error);
+int             mempool_contains(const mempool_t *pool, const void *ptr);
 
 #if MEMPOOL_ENABLE_STATS
 mempool_error_t mempool_get_stats(const mempool_t *pool,
                                   mempool_stats_t *stats);
 #endif
 
-#if MEMPOOL_ENABLE_SYNC
-mempool_error_t mempool_set_sync(mempool_t      *pool,
-                                 mempool_lock_fn lock,
-                                 mempool_unlock_fn unlock,
-                                 void           *user_ctx);
+#if MEMPOOL_ENABLE_STRERROR
+const char *mempool_strerror(mempool_error_t error);
 #endif
 
 #ifdef __cplusplus
