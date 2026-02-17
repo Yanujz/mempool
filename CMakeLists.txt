@@ -12,6 +12,11 @@ option(MEMPOOL_ENABLE_SANITIZERS "Enable Address/UB sanitizers (ASan+UBSan)" ON)
 option(MEMPOOL_ENABLE_TSAN       "Enable ThreadSanitizer (mutually exclusive with ASan/UBSan)" OFF)
 option(MEMPOOL_ENABLE_COVERAGE   "Enable coverage instrumentation" ON)
 
+# Library feature toggles (passed as compile definitions)
+option(MEMPOOL_OPT_STATS            "Enable statistics tracking"      ON)
+option(MEMPOOL_OPT_SYNC             "Enable synchronization hooks"    ON)
+option(MEMPOOL_OPT_DOUBLE_FREE_CHK  "Enable double-free detection"    ON)
+
 # Common warning flags
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wstrict-prototypes)
@@ -56,6 +61,11 @@ add_library(mempool STATIC src/mempool.c)
 target_include_directories(mempool PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+)
+target_compile_definitions(mempool PUBLIC
+    MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
+    MEMPOOL_ENABLE_SYNC=$<BOOL:${MEMPOOL_OPT_SYNC}>
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
 )
 
 # C test harness
@@ -110,7 +120,7 @@ install(TARGETS mempool
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
-install(FILES include/mempool.h DESTINATION include)
+install(FILES include/mempool.h include/mempool_cfg.h DESTINATION include)
 
 # CPack packaging
 set(CPACK_GENERATOR "TGZ;ZIP")
