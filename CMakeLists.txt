@@ -123,6 +123,29 @@ target_link_libraries(mempool_gtest
 include(GoogleTest)
 gtest_discover_tests(mempool_gtest)
 
+# Comprehensive test suite with 500+ cases
+add_executable(mempool_gtest_comprehensive
+    src/mempool.c
+    tests/gtest_mempool_comprehensive.cpp
+)
+target_include_directories(mempool_gtest_comprehensive PRIVATE include tests)
+target_compile_definitions(mempool_gtest_comprehensive PRIVATE
+    MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
+    MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+)
+target_compile_options(mempool_gtest_comprehensive PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+)
+target_link_libraries(mempool_gtest_comprehensive
+    PRIVATE
+        GTest::gtest_main
+)
+
+gtest_discover_tests(mempool_gtest_comprehensive)
+
 add_test(NAME mempool_ctest COMMAND mempool_ctest)
 
 # Installation
