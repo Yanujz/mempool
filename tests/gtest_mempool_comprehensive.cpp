@@ -27,16 +27,18 @@ constexpr size_t MAX_POOL_BUF = 128U * 1024U;
 constexpr size_t TEST_ALIGN = 8U;
 
 /* Calculate minimum pool buffer size needed for N blocks of given size and alignment.
- * Accounts for bitmap overhead when MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1 */
+ * Accounts for aligned block size and bitmap overhead when
+ * MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1 (matches mempool_init internals). */
 static size_t calc_min_pool_size(size_t block_size, size_t num_blocks, size_t alignment) {
-#ifdef MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
-    size_t bitmap_size = (num_blocks + 7) / 8;  /* Round up to bytes */
-    /* Align bitmap to alignment */
-    size_t bitmap_aligned = (bitmap_size + alignment - 1) & ~(alignment - 1);
-    return bitmap_aligned + (num_blocks * block_size);
+    /* Mirror the implementation: block_size is rounded up to alignment */
+    size_t abs = (block_size + alignment - 1U) & ~(alignment - 1U);
+#if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
+    size_t bitmap_bytes = (num_blocks + 7U) / 8U;
+    size_t bitmap_aligned = (bitmap_bytes + alignment - 1U) & ~(alignment - 1U);
+    return bitmap_aligned + (num_blocks * abs);
 #else
     (void)alignment;
-    return num_blocks * block_size;
+    return num_blocks * abs;
 #endif
 }
 
@@ -93,8 +95,8 @@ INSTANTIATE_TEST_SUITE_P(
     AlignmentBlockSizeCombos,
     MempoolInitTest,
     ::testing::Values(
-        /* alignment=1 (will fail) */
-        InitParams{1, 64, 4096, false},
+        /* alignment=1 - valid power-of-2, should succeed */
+        InitParams{1, 64, 4096, true},
         /* alignment=2 */
         InitParams{2, 8, 1024, true},
         InitParams{2, 16, 2048, true},
@@ -145,10 +147,10 @@ INSTANTIATE_TEST_SUITE_P(
         /* Edge: block_size too small (< sizeof(free_node_t) = 8 on 64-bit) */
         InitParams{4, 4, 1024, false},
         InitParams{8, 4, 1024, false},
-        /* Edge: exact fit */
-        InitParams{8, 64, 64, true},
-        InitParams{8, 128, 128, true},
-        /* Edge: off-by-one too small */
+        /* Edge: exact fit (1 block; size accounts for bitmap when enabled) */
+        InitParams{8, 64, 72, true},
+        InitParams{8, 128, 136, true},
+        /* Edge: just below exact fit */
         InitParams{8, 64, 63, false},
         InitParams{8, 128, 127, false},
         /* Large pools */
