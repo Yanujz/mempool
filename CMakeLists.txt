@@ -12,6 +12,16 @@ option(MEMPOOL_ENABLE_SANITIZERS "Enable Address/UB sanitizers (ASan+UBSan)" ON)
 option(MEMPOOL_ENABLE_TSAN       "Enable ThreadSanitizer (mutually exclusive with ASan/UBSan)" OFF)
 option(MEMPOOL_ENABLE_COVERAGE   "Enable coverage instrumentation" ON)
 
+# Library feature toggles (passed as compile definitions)
+option(MEMPOOL_OPT_STATS            "Enable statistics tracking"              ON)
+option(MEMPOOL_OPT_DOUBLE_FREE_CHK  "Enable double-free detection (bitmap)"   ON)
+option(MEMPOOL_OPT_STRERROR         "Enable mempool_strerror()"               ON)
+option(MEMPOOL_OPT_GUARD            "Enable post-canary buffer-overrun check"  OFF)
+option(MEMPOOL_OPT_POISON           "Enable alloc/free poison fill patterns"   OFF)
+option(MEMPOOL_OPT_OOM_HOOK         "Enable out-of-memory callback hook"       OFF)
+option(MEMPOOL_OPT_ISR_FREE         "Enable ISR-safe deferred-free queue"      OFF)
+option(MEMPOOL_OPT_TAGS             "Enable per-block 32-bit caller tags"      OFF)
+
 # Common warning flags
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wstrict-prototypes)
@@ -51,16 +61,33 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 endif()
 
+# Core library source files (split from the original monolithic mempool.c)
+set(MEMPOOL_CORE_SRCS
+    src/mempool_core.c
+    src/mempool_diag.c
+    src/mempool_isr.c
+)
+
 # Library
-add_library(mempool STATIC src/mempool.c)
+add_library(mempool STATIC ${MEMPOOL_CORE_SRCS} src/mempool_mgr.c)
 target_include_directories(mempool PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+target_compile_definitions(mempool PUBLIC
+    MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
+    MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+    MEMPOOL_ENABLE_GUARD=$<BOOL:${MEMPOOL_OPT_GUARD}>
+    MEMPOOL_ENABLE_POISON=$<BOOL:${MEMPOOL_OPT_POISON}>
+    MEMPOOL_ENABLE_OOM_HOOK=$<BOOL:${MEMPOOL_OPT_OOM_HOOK}>
+    MEMPOOL_ENABLE_ISR_FREE=$<BOOL:${MEMPOOL_OPT_ISR_FREE}>
+    MEMPOOL_ENABLE_TAGS=$<BOOL:${MEMPOOL_OPT_TAGS}>
+)
 
 # C test harness
 add_executable(mempool_ctest
-    src/mempool.c
+    ${MEMPOOL_CORE_SRCS}
     tests/test_mempool.c
 )
 target_include_directories(mempool_ctest PRIVATE include)
@@ -91,17 +118,181 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 add_executable(mempool_gtest
+    ${MEMPOOL_CORE_SRCS}
     tests/gtest_mempool.cpp
 )
-target_include_directories(mempool_gtest PRIVATE include)
+target_include_directories(mempool_gtest PRIVATE include tests)
+target_compile_definitions(mempool_gtest PRIVATE
+    MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
+    MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+    MEMPOOL_ENABLE_GUARD=0
+    MEMPOOL_ENABLE_POISON=0
+    MEMPOOL_ENABLE_OOM_HOOK=0
+    MEMPOOL_ENABLE_ISR_FREE=0
+    MEMPOOL_ENABLE_TAGS=0
+)
+target_compile_options(mempool_gtest PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+)
 target_link_libraries(mempool_gtest
     PRIVATE
-        mempool
         GTest::gtest_main
 )
 
 include(GoogleTest)
 gtest_discover_tests(mempool_gtest)
+
+# Comprehensive test suite with 500+ cases
+add_executable(mempool_gtest_comprehensive
+    ${MEMPOOL_CORE_SRCS}
+    tests/gtest_mempool_comprehensive.cpp
+)
+target_include_directories(mempool_gtest_comprehensive PRIVATE include tests)
+target_compile_definitions(mempool_gtest_comprehensive PRIVATE
+    MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
+    MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+    MEMPOOL_ENABLE_GUARD=0
+    MEMPOOL_ENABLE_POISON=0
+    MEMPOOL_ENABLE_OOM_HOOK=0
+    MEMPOOL_ENABLE_ISR_FREE=0
+    MEMPOOL_ENABLE_TAGS=0
+)
+target_compile_options(mempool_gtest_comprehensive PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+)
+target_link_libraries(mempool_gtest_comprehensive
+    PRIVATE
+        GTest::gtest_main
+)
+
+gtest_discover_tests(mempool_gtest_comprehensive)
+
+# Hardening test suite — exercises all new production-grade features
+add_executable(mempool_gtest_hardening
+    ${MEMPOOL_CORE_SRCS}
+    src/mempool_mgr.c
+    tests/gtest_mempool_hardening.cpp
+)
+target_include_directories(mempool_gtest_hardening PRIVATE include tests)
+target_compile_definitions(mempool_gtest_hardening PRIVATE
+    MEMPOOL_ENABLE_STATS=1
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_hardening PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_hardening
+    PRIVATE
+        GTest::gtest_main
+)
+
+gtest_discover_tests(mempool_gtest_hardening)
+
+# No-STATS mgr regression build — verifies that mempool_mgr compiles and
+# operates correctly when MEMPOOL_ENABLE_STATS=0 (previously a compile error).
+add_executable(mempool_gtest_mgr_nostats
+    ${MEMPOOL_CORE_SRCS}
+    src/mempool_mgr.c
+    tests/gtest_mempool_mgr_nostats.cpp
+)
+target_include_directories(mempool_gtest_mgr_nostats PRIVATE include tests)
+target_compile_definitions(mempool_gtest_mgr_nostats PRIVATE
+    MEMPOOL_ENABLE_STATS=0
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_mgr_nostats PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_mgr_nostats
+    PRIVATE
+        GTest::gtest_main
+)
+
+gtest_discover_tests(mempool_gtest_mgr_nostats)
+
+# -----------------------------------------------------------------------
+# Stress test suite — 1000+ parameterised cases, all features ON
+# -----------------------------------------------------------------------
+add_executable(mempool_gtest_stress
+    ${MEMPOOL_CORE_SRCS}
+    src/mempool_mgr.c
+    tests/gtest_mempool_stress.cpp
+)
+target_include_directories(mempool_gtest_stress PRIVATE include tests)
+target_compile_definitions(mempool_gtest_stress PRIVATE
+    MEMPOOL_ENABLE_STATS=1
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_stress PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_stress PRIVATE GTest::gtest_main)
+gtest_discover_tests(mempool_gtest_stress)
+
+# -----------------------------------------------------------------------
+# Paranoia test suite — deep invariant/security checks, all features ON
+# -----------------------------------------------------------------------
+add_executable(mempool_gtest_paranoia
+    ${MEMPOOL_CORE_SRCS}
+    src/mempool_mgr.c
+    tests/gtest_mempool_paranoia.cpp
+)
+target_include_directories(mempool_gtest_paranoia PRIVATE include tests)
+target_compile_definitions(mempool_gtest_paranoia PRIVATE
+    MEMPOOL_ENABLE_STATS=1
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_paranoia PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_paranoia PRIVATE GTest::gtest_main)
+gtest_discover_tests(mempool_gtest_paranoia)
 
 add_test(NAME mempool_ctest COMMAND mempool_ctest)
 
@@ -110,7 +301,8 @@ install(TARGETS mempool
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
-install(FILES include/mempool.h DESTINATION include)
+install(FILES include/mempool.h include/mempool_cfg.h include/mempool_mgr.h
+        DESTINATION include)
 
 # CPack packaging
 set(CPACK_GENERATOR "TGZ;ZIP")

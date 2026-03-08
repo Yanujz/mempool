@@ -1,0 +1,69 @@
+# Doxyfile for mempool
+# Run: doxygen Doxyfile
+# Output: docs/html/index.html
+
+PROJECT_NAME           = "mempool"
+PROJECT_NUMBER         = "0.5.0"
+PROJECT_BRIEF          = "Deterministic O(1) memory pool for embedded and safety-critical systems"
+PROJECT_LOGO           =
+OUTPUT_DIRECTORY       = docs/doxygen
+CREATE_SUBDIRS         = NO
+OUTPUT_LANGUAGE        = English
+
+# ── Input ─────────────────────────────────────────────────────────────
+INPUT                  = include/mempool.h \
+                         include/mempool_cfg.h \
+                         include/mempool_mgr.h \
+                         README.md \
+                         AUDIT.md
+USE_MDFILE_AS_MAINPAGE = README.md
+RECURSIVE              = NO
+FILE_PATTERNS          = *.h *.md
+
+# ── Extraction ────────────────────────────────────────────────────────
+EXTRACT_ALL            = NO
+EXTRACT_STATIC         = NO
+EXTRACT_PRIVATE        = NO
+HIDE_UNDOC_MEMBERS     = YES
+HIDE_UNDOC_CLASSES     = YES
+SHOW_INCLUDE_FILES     = YES
+SHOW_USED_FILES        = NO
+
+# ── Preprocessor ──────────────────────────────────────────────────────
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = NO
+# Force all optional feature guards open so every function appears in the docs.
+PREDEFINED             = MEMPOOL_ENABLE_STATS=1 \
+                         MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1 \
+                         MEMPOOL_ENABLE_STRERROR=1 \
+                         MEMPOOL_ENABLE_GUARD=1 \
+                         MEMPOOL_ENABLE_POISON=1 \
+                         MEMPOOL_ENABLE_OOM_HOOK=1 \
+                         MEMPOOL_ENABLE_ISR_FREE=1 \
+                         MEMPOOL_ENABLE_TAGS=1
+
+# ── Output formats ────────────────────────────────────────────────────
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+HTML_COLORSTYLE        = LIGHT
+GENERATE_TREEVIEW      = YES
+FULL_SIDEBAR           = NO
+SEARCHENGINE           = YES
+
+GENERATE_LATEX         = NO
+GENERATE_RTF           = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+
+# ── Diagrams ──────────────────────────────────────────────────────────
+HAVE_DOT               = NO
+CLASS_DIAGRAMS         = NO
+
+# ── Warnings ──────────────────────────────────────────────────────────
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_LOGFILE           =

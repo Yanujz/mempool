@@ -2,16 +2,20 @@
 #include <stdint.h>
 #include "mempool.h"
 
+#define BLOCK_SIZE     64U
+#define NUM_BLOCKS     100U
 #define TEST_ALIGNMENT 8U
 
-static uint8_t state_buf[MEMPOOL_STATE_SIZE] __attribute__((aligned(TEST_ALIGNMENT)));
-static uint8_t pool_buf[8192U]               __attribute__((aligned(TEST_ALIGNMENT)));
+static uint8_t state_buf[MEMPOOL_STATE_SIZE]
+    __attribute__((aligned(TEST_ALIGNMENT)));
+static uint8_t pool_buf[MEMPOOL_POOL_BUFFER_SIZE(BLOCK_SIZE, NUM_BLOCKS, TEST_ALIGNMENT)]
+    __attribute__((aligned(TEST_ALIGNMENT)));
 
 int main(void)
 {
     mempool_t *pool = NULL;
     mempool_error_t err;
-    void *blocks[100];
+    void *blocks[NUM_BLOCKS];
     uint32_t i;
     uint32_t cycle;
 
@@ -24,24 +28,24 @@ int main(void)
 
     err = mempool_init(state_buf, sizeof(state_buf),
                        pool_buf, sizeof(pool_buf),
-                       64U, TEST_ALIGNMENT, &pool);
+                       BLOCK_SIZE, TEST_ALIGNMENT, &pool);
     if (err != MEMPOOL_OK) {
         printf("mempool_init failed: %s\n", mempool_strerror(err));
         return 1;
     }
 
-    for (i = 0U; i < 100U; i++) {
+    for (i = 0U; i < NUM_BLOCKS; i++) {
         blocks[i] = NULL;
     }
 
     for (cycle = 0U; cycle < 10U; cycle++) {
-        for (i = 0U; i < 100U; i++) {
+        for (i = 0U; i < NUM_BLOCKS; i++) {
             if (mempool_alloc(pool, &blocks[i]) != MEMPOOL_OK) {
                 blocks[i] = NULL;
             }
         }
 
-        for (i = 0U; i < 100U; i++) {
+        for (i = 0U; i < NUM_BLOCKS; i++) {
             if (blocks[i] != NULL) {
                 (void)mempool_free(pool, blocks[i]);
                 blocks[i] = NULL;

@@ -6,8 +6,22 @@
 #include <atomic>
 #include <mutex>
 
+/*
+ * Provide C-linkage lock/unlock wrappers around a global mutex.
+ * The gtest CMake target compiles mempool.c with
+ *   -DMEMPOOL_LOCK()=mempool_test_lock()
+ *   -DMEMPOOL_UNLOCK()=mempool_test_unlock()
+ * so every alloc/free inside the library calls these.
+ */
+static std::mutex g_mempool_mtx;
+
 extern "C" {
+
+void mempool_test_lock(void)   { g_mempool_mtx.lock();   }
+void mempool_test_unlock(void) { g_mempool_mtx.unlock(); }
+
 #include "mempool.h"
+
 }
 
 // When running under Cppcheck, gtest headers are not parsed (system headers),
@@ -446,6 +460,7 @@ TEST(MultiPoolTests, IndependentPools)
  * strerror tests
  * -------------------------------------------------------------------------- */
 
+#if MEMPOOL_ENABLE_STRERROR
 TEST(MempoolStringTests, ErrorStringsNonNullAndNonEmpty)
 {
     mempool_error_t errors[] = {
@@ -468,26 +483,11 @@ TEST(MempoolStringTests, ErrorStringsNonNullAndNonEmpty)
     const char *unknown = mempool_strerror(static_cast<mempool_error_t>(9999));
     EXPECT_NE(nullptr, unknown);
 }
+#endif
 
 /* --------------------------------------------------------------------------
- * Thread-safety tests using mempool_set_sync + std::mutex
+ * Thread-safety tests — sync via MEMPOOL_LOCK/UNLOCK macros above
  * -------------------------------------------------------------------------- */
-
-struct MutexContext {
-    std::mutex m;
-};
-
-static void lock_callback(void *ctx)
-{
-    auto *mc = static_cast<MutexContext *>(ctx);
-    mc->m.lock();
-}
-
-static void unlock_callback(void *ctx)
-{
-    auto *mc = static_cast<MutexContext *>(ctx);
-    mc->m.unlock();
-}
 
 TEST(MempoolThreadSafeTests, ConcurrentAllocFree)
 {
@@ -501,10 +501,6 @@ TEST(MempoolThreadSafeTests, ConcurrentAllocFree)
               mempool_init(state_buf, sizeof(state_buf),
                            pool_buf, sizeof(pool_buf),
                            64U, TEST_ALIGN, &pool));
-
-    MutexContext ctx;
-    ASSERT_EQ(MEMPOOL_OK,
-              mempool_set_sync(pool, lock_callback, unlock_callback, &ctx));
 
     constexpr int THREADS = 8;
     constexpr int ITERS   = 2000;
@@ -560,10 +556,6 @@ TEST(MempoolThreadSafeTests, ContainsUnderConcurrency)
                            pool_buf, sizeof(pool_buf),
                            64U, TEST_ALIGN, &pool));
 
-    MutexContext ctx;
-    ASSERT_EQ(MEMPOOL_OK,
-              mempool_set_sync(pool, lock_callback, unlock_callback, &ctx));
-
     constexpr int THREADS = 4;
     constexpr int ITERS   = 1000;
     std::atomic<int> failures(0);
@@ -573,7 +565,7 @@ TEST(MempoolThreadSafeTests, ContainsUnderConcurrency)
             void *block = nullptr;
             mempool_error_t err = mempool_alloc(pool, &block);
             if (err == MEMPOOL_OK) {
-                bool inside = mempool_contains(pool, block);
+                int inside = mempool_contains(pool, block);
                 if (!inside) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                 }
