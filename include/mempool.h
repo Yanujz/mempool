@@ -117,6 +117,26 @@ mempool_error_t mempool_reset(mempool_t *pool);
  */
 int mempool_contains(const mempool_t *pool, const void *ptr);
 
+/**
+ * Return the per-block stride in bytes.
+ *
+ * When MEMPOOL_ENABLE_GUARD is ON the stride includes the 4-byte post-canary
+ * padding; the caller-visible area is correspondingly smaller.
+ * This function is always available regardless of MEMPOOL_ENABLE_STATS.
+ *
+ * @return Block stride, or 0 on invalid arguments.
+ */
+uint32_t mempool_block_size(const mempool_t *pool);
+
+/**
+ * Return the total number of blocks (pool capacity) established at init time.
+ *
+ * This function is always available regardless of MEMPOOL_ENABLE_STATS.
+ *
+ * @return Block count, or 0 on invalid arguments.
+ */
+uint32_t mempool_capacity(const mempool_t *pool);
+
 /* -------------------------------------------------------------------------
  * Statistics
  * ---------------------------------------------------------------------- */

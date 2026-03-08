@@ -283,10 +283,9 @@ TEST_F(OomHookTest, HookCalledOnExhaustion) {
     ASSERT_EQ(MEMPOOL_OK,
               mempool_set_oom_hook(pool, oom_cb, &userdata));
 
-    /* Find out how many blocks the pool actually has */
-    mempool_stats_t st{};
-    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &st));
-    uint32_t cap = st.total_blocks;
+    /* Find out how many blocks the pool actually has — use mempool_capacity()
+     * which works regardless of MEMPOOL_ENABLE_STATS. */
+    uint32_t cap = mempool_capacity(pool);
 
     /* Exhaust all blocks */
     std::vector<void*> blks(cap, nullptr);
@@ -690,6 +689,170 @@ TEST_F(MgrTest, PoolOutNullIsAccepted) {
     ASSERT_EQ(MEMPOOL_OK, mempool_mgr_alloc(&mgr, 10U, &blk, nullptr));
     EXPECT_NE(nullptr, blk);
     (void)mempool_mgr_free(&mgr, blk);
+}
+
+/* -----------------------------------------------------------------------
+ * mempool_block_size / mempool_capacity (always-available query API)
+ * -------------------------------------------------------------------- */
+
+class BlockInfoTest : public ::testing::Test {
+protected:
+    static constexpr size_t BLOCK = 64U;
+    static constexpr size_t NBLK  = 4U;
+
+    alignas(8) uint8_t state_buf[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pool_buf[pool_buf_for(64, 4)]{};
+    mempool_t *pool = nullptr;
+
+    void SetUp() override {
+        pool = make_pool(state_buf, sizeof state_buf,
+                         pool_buf,  sizeof pool_buf, BLOCK);
+        ASSERT_NE(nullptr, pool);
+    }
+};
+
+TEST_F(BlockInfoTest, BlockSizeIsNonZero) {
+    EXPECT_GT(mempool_block_size(pool), 0U);
+}
+
+TEST_F(BlockInfoTest, BlockSizeIncludesGuardOverhead) {
+    /* With GUARD ON the stride = align_up(BLOCK + 4, alignment). */
+    uint32_t bs = mempool_block_size(pool);
+#if MEMPOOL_ENABLE_GUARD
+    EXPECT_GE(bs, static_cast<uint32_t>(BLOCK + 4U));
+#else
+    EXPECT_GE(bs, static_cast<uint32_t>(BLOCK));
+#endif
+    (void)bs;
+}
+
+TEST_F(BlockInfoTest, CapacityAtLeastNblk) {
+    /* pool_buf_for() over-provisions so we must fit at least NBLK blocks. */
+    EXPECT_GE(mempool_capacity(pool), static_cast<uint32_t>(NBLK));
+}
+
+TEST_F(BlockInfoTest, NullPoolReturnsZero) {
+    EXPECT_EQ(0U, mempool_block_size(nullptr));
+    EXPECT_EQ(0U, mempool_capacity(nullptr));
+}
+
+/* -----------------------------------------------------------------------
+ * ISR free + DOUBLE_FREE_CHECK bitmap interaction
+ * These tests catch the bug where mp_flush_isr_queue() was not clearing
+ * the bitmap bit, allowing a subsequent mempool_free() to silently
+ * double-add a block to the free list and corrupt the pool.
+ * -------------------------------------------------------------------- */
+
+class IsrBitmapTest : public ::testing::Test {
+protected:
+    static constexpr size_t BLOCK = 32U;
+    static constexpr size_t NBLK  = 8U;
+
+    alignas(8) uint8_t state_buf[MEMPOOL_STATE_SIZE]{};
+    std::vector<uint8_t> pool_buf_storage;
+    mempool_t *pool = nullptr;
+
+    void SetUp() override {
+        pool_buf_storage.assign(pool_buf_for(BLOCK, NBLK) + 8U, 0U);
+        auto *raw = pool_buf_storage.data();
+        size_t space = pool_buf_storage.size();
+        std::align(8U, pool_buf_storage.size() - 8U,
+                   reinterpret_cast<void*&>(raw), space);
+        pool = make_pool(state_buf, sizeof state_buf,
+                         raw, pool_buf_storage.size() - 8U, BLOCK);
+        ASSERT_NE(nullptr, pool);
+    }
+};
+
+TEST_F(IsrBitmapTest, NormalFreeAfterIsrDrainDetectsDoubleFree) {
+    /* Alloc a block, free it via ISR, drain, then attempt a normal free.
+     * The bitmap must correctly detect the double-free after the drain. */
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+
+    ASSERT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blk));
+    ASSERT_EQ(MEMPOOL_OK, mempool_drain_isr_queue(pool));
+
+    /* Block is now free; a second free must be caught. */
+    EXPECT_EQ(MEMPOOL_ERR_DOUBLE_FREE, mempool_free(pool, blk));
+}
+
+TEST_F(IsrBitmapTest, PoolRemainsConsistentAfterIsrDrain) {
+    /* Exhaust pool, free all via ISR, drain, then re-exhaust to confirm
+     * every block is reachable exactly once after the ISR path. */
+    uint32_t cap = mempool_capacity(pool);
+
+    std::vector<void*> blks(cap, nullptr);
+    for (uint32_t i = 0U; i < cap; i++) {
+        ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blks[i]));
+    }
+    EXPECT_EQ(MEMPOOL_ERR_OUT_OF_MEMORY, mempool_alloc(pool, &blks[0]));
+
+    for (uint32_t i = 0U; i < cap; i++) {
+        ASSERT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blks[i]));
+        if ((i + 1U) % MEMPOOL_ISR_QUEUE_CAPACITY == 0U) {
+            ASSERT_EQ(MEMPOOL_OK, mempool_drain_isr_queue(pool));
+        }
+    }
+    ASSERT_EQ(MEMPOOL_OK, mempool_drain_isr_queue(pool));
+
+    /* All blocks must be allocatable again — exactly cap of them. */
+    uint32_t count = 0U;
+    std::vector<void*> blks2;
+    void *b = nullptr;
+    while (mempool_alloc(pool, &b) == MEMPOOL_OK) {
+        blks2.push_back(b);
+        count++;
+    }
+    EXPECT_EQ(cap, count);
+    for (auto bb : blks2) { (void)mempool_free(pool, bb); }
+}
+
+/* -----------------------------------------------------------------------
+ * mempool_free_from_isr — block validation (range and alignment)
+ * -------------------------------------------------------------------- */
+
+class IsrValidateTest : public ::testing::Test {
+protected:
+    static constexpr size_t BLOCK = 32U;
+    static constexpr size_t NBLK  = 4U;
+
+    alignas(8) uint8_t state_buf[MEMPOOL_STATE_SIZE]{};
+    std::vector<uint8_t> pool_buf_storage;
+    mempool_t *pool = nullptr;
+
+    void SetUp() override {
+        pool_buf_storage.assign(pool_buf_for(BLOCK, NBLK) + 8U, 0U);
+        auto *raw = pool_buf_storage.data();
+        size_t space = pool_buf_storage.size();
+        std::align(8U, pool_buf_storage.size() - 8U,
+                   reinterpret_cast<void*&>(raw), space);
+        pool = make_pool(state_buf, sizeof state_buf,
+                         raw, pool_buf_storage.size() - 8U, BLOCK);
+        ASSERT_NE(nullptr, pool);
+    }
+};
+
+TEST_F(IsrValidateTest, PointerOutsidePoolRejected) {
+    uint8_t not_in_pool[32]{};
+    EXPECT_EQ(MEMPOOL_ERR_INVALID_BLOCK,
+              mempool_free_from_isr(pool, not_in_pool));
+}
+
+TEST_F(IsrValidateTest, MisalignedPointerRejected) {
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+
+    /* Shift by 1 byte — misaligned within the block region. */
+    void *misaligned = static_cast<uint8_t*>(blk) + 1U;
+    EXPECT_EQ(MEMPOOL_ERR_INVALID_BLOCK,
+              mempool_free_from_isr(pool, misaligned));
+
+    (void)mempool_free(pool, blk);
+}
+
+TEST_F(IsrValidateTest, NullBlockRejected) {
+    EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_free_from_isr(pool, nullptr));
 }
 
 } /* anonymous namespace */
