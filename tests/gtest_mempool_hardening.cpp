@@ -855,4 +855,152 @@ TEST_F(IsrValidateTest, NullBlockRejected) {
     EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_free_from_isr(pool, nullptr));
 }
 
+/* -----------------------------------------------------------------------
+ * ISR drain path: GUARD validation and POISON fill
+ * These tests verify that blocks freed via mempool_free_from_isr() have
+ * their canary checked and are poisoned on drain, matching the protection
+ * provided by the normal mempool_free() path.
+ * -------------------------------------------------------------------- */
+
+class IsrGuardPoisonTest : public ::testing::Test {
+protected:
+    static constexpr size_t BLOCK = 32U;
+    static constexpr size_t NBLK  = 4U;
+
+    alignas(8) uint8_t state_buf[MEMPOOL_STATE_SIZE]{};
+    std::vector<uint8_t> pool_buf_storage;
+    mempool_t *pool = nullptr;
+
+    void SetUp() override {
+        pool_buf_storage.assign(pool_buf_for(BLOCK, NBLK) + 8U, 0U);
+        auto *raw = pool_buf_storage.data();
+        size_t space = pool_buf_storage.size();
+        std::align(8U, pool_buf_storage.size() - 8U,
+                   reinterpret_cast<void*&>(raw), space);
+        pool = make_pool(state_buf, sizeof state_buf,
+                         raw, pool_buf_storage.size() - 8U, BLOCK);
+        ASSERT_NE(nullptr, pool);
+    }
+};
+
+TEST_F(IsrGuardPoisonTest, GuardViolationDetectedOnIsrDrain) {
+    /* Alloc a block, corrupt its canary, queue it via ISR, drain.
+     * The block must NOT be returned to the free list and the
+     * guard_violations counter must be incremented. */
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+
+    /* Corrupt the post-canary (byte just past the user area) */
+    uint32_t bad = 0xDEAD1234U;
+    std::memcpy(static_cast<uint8_t*>(blk) + BLOCK, &bad, sizeof bad);
+
+    ASSERT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blk));
+    ASSERT_EQ(MEMPOOL_OK, mempool_drain_isr_queue(pool));
+
+    mempool_stats_t st{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &st));
+    EXPECT_EQ(1U, st.guard_violations);
+
+    /* The corrupted block must not be in the free list — pool is one block
+     * short.  Allocating capacity blocks must fail with OOM (not succeed). */
+    uint32_t cap = mempool_capacity(pool);
+    std::vector<void*> blks;
+    void *b = nullptr;
+    while (mempool_alloc(pool, &b) == MEMPOOL_OK) { blks.push_back(b); }
+    /* One block is permanently withdrawn — can only get (cap - 1) blocks. */
+    EXPECT_EQ(cap - 1U, static_cast<uint32_t>(blks.size()));
+    for (auto bb : blks) { (void)mempool_free(pool, bb); }
+}
+
+TEST_F(IsrGuardPoisonTest, PoisonFillAppliedOnIsrDrain) {
+    /* Alloc a block, fill it with 0xAB, queue via ISR, drain.
+     * After drain the user bytes (past the free-list pointer) must be 0xDD. */
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+    std::memset(blk, 0xAB, BLOCK);
+
+    ASSERT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blk));
+    ASSERT_EQ(MEMPOOL_OK, mempool_drain_isr_queue(pool));
+
+    auto *bytes = static_cast<uint8_t*>(blk);
+    /* The first sizeof(void*) bytes hold the intrusive free-list pointer. */
+    for (size_t i = sizeof(void*); i < BLOCK; i++) {
+        EXPECT_EQ(MEMPOOL_FREE_POISON_BYTE, bytes[i])
+            << "ISR drain poison mismatch at byte " << i;
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * mempool_is_initialized() — new always-available validity check
+ * -------------------------------------------------------------------- */
+
+TEST(IsInitializedTest, ValidPoolReturnsOne) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+    EXPECT_EQ(1, mempool_is_initialized(pool));
+}
+
+TEST(IsInitializedTest, NullPoolReturnsZero) {
+    EXPECT_EQ(0, mempool_is_initialized(nullptr));
+}
+
+TEST(IsInitializedTest, UninitializedBufferReturnsZero) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};  /* zeroed, not init'd */
+    EXPECT_EQ(0, mempool_is_initialized(reinterpret_cast<mempool_t*>(state)));
+}
+
+/* -----------------------------------------------------------------------
+ * mempool_mgr_init() — rejects uninitialized pool handles
+ * -------------------------------------------------------------------- */
+
+TEST(MgrInitValidationTest, RejectsUninitializedPool) {
+    alignas(8) uint8_t s0[MEMPOOL_STATE_SIZE]{}, s1[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t p0[pool_buf_for(32, 4)]{};
+    mempool_t *pool0 = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(s0, sizeof s0, p0, sizeof p0,
+                                       32U, 8U, &pool0));
+
+    /* s1 is zeroed (not initialised) — reinterpret as a pool handle */
+    mempool_t *uninit = reinterpret_cast<mempool_t*>(s1);
+
+    mempool_mgr_t mgr{};
+    mempool_t *pools[2] = { pool0, uninit };
+    EXPECT_EQ(MEMPOOL_ERR_NOT_INITIALIZED,
+              mempool_mgr_init(&mgr, pools, 2U));
+}
+
+/* -----------------------------------------------------------------------
+ * mempool_alloc_zero() — *block is NULL on error
+ * -------------------------------------------------------------------- */
+
+TEST(AllocZeroNullOnErrorTest, BlockNulledOnOOM) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    /* Exhaust the pool */
+    uint32_t cap = mempool_capacity(pool);
+    std::vector<void*> blks(cap, nullptr);
+    for (uint32_t i = 0U; i < cap; i++) {
+        ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blks[i]));
+    }
+
+    void *blk = reinterpret_cast<void*>(0xDEADDEADUL); /* non-null sentinel */
+    EXPECT_EQ(MEMPOOL_ERR_OUT_OF_MEMORY, mempool_alloc_zero(pool, &blk));
+    EXPECT_EQ(nullptr, blk); /* must be cleared on error */
+
+    for (auto b : blks) { (void)mempool_free(pool, b); }
+}
+
+TEST(AllocZeroNullOnErrorTest, NullPoolSetsBlockNull) {
+    void *blk = reinterpret_cast<void*>(0xDEADDEADUL);
+    EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_alloc_zero(nullptr, &blk));
+    EXPECT_EQ(nullptr, blk);
+}
+
 } /* anonymous namespace */
