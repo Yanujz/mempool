@@ -67,6 +67,12 @@ struct mempool {
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(MEMPOOL_STATE_SIZE >= sizeof(struct mempool),
                "MEMPOOL_STATE_SIZE too small — increase it in mempool_cfg.h");
+#if MEMPOOL_ENABLE_ISR_FREE
+_Static_assert(MEMPOOL_ISR_QUEUE_CAPACITY <= 255U,
+               "MEMPOOL_ISR_QUEUE_CAPACITY exceeds 255 — isr_head/isr_tail/isr_count "
+               "are uint8_t and would silently overflow. Reduce the capacity or widen "
+               "the index fields.");
+#endif
 #endif
 
 /* ------------------------------------------------------------------ */

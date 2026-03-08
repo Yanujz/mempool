@@ -343,6 +343,13 @@ mempool_error_t mempool_free(mempool_t *pool, void *block)
     memset(block, (int)(uint8_t)MEMPOOL_FREE_POISON_BYTE, mp_user_size(pool));
 #endif
 
+#if MEMPOOL_ENABLE_TAGS
+    /* Clear the tag so realloc callers do not see a stale annotation from
+     * the previous owner.  Must be inside the lock because get_block_tag()
+     * also acquires it. */
+    pool->tags[mp_block_idx(pool, block)] = 0U;
+#endif
+
     {
         free_node_t *nd = (free_node_t *)block;
         nd->next        = (free_node_t *)pool->free_list;
