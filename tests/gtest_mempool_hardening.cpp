@@ -1401,4 +1401,50 @@ TEST(IsrGuardFailureStatsTest, UsedBlocksDecrementedOnIsrGuardFailure) {
     EXPECT_EQ(mempool_capacity(pool) - 1U, s.free_blocks);
 }
 
+/* -------------------------------------------------------------------- *
+ *  Tag cleared on mempool_free                                         *
+ * -------------------------------------------------------------------- */
+TEST(TagClearedOnFreeTest, ReallocDoesNotInheritPreviousOwnerTag) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 1)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    /* Allocate and tag the block. */
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc_tagged(pool, &blk, 0xCAFEBABEU));
+
+    uint32_t t = 0U;
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_block_tag(pool, blk, &t));
+    EXPECT_EQ(0xCAFEBABEU, t);
+
+    /* Free the block — tag must be cleared. */
+    ASSERT_EQ(MEMPOOL_OK, mempool_free(pool, blk));
+
+    /* Reallocate — same physical block; tag must be 0. */
+    void *blk2 = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk2));
+    EXPECT_EQ(blk, blk2); /* LIFO free-list: same block */
+
+    uint32_t t2 = 0xFFFFFFFFU;
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_block_tag(pool, blk2, &t2));
+    EXPECT_EQ(0U, t2);
+}
+
+TEST(TagClearedOnFreeTest, PlainAllocSeesFreshTag) {
+    /* A fresh alloc (no previous tag written) must read 0. */
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    void *b0 = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &b0));
+    uint32_t t0 = 0xDEADU;
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_block_tag(pool, b0, &t0));
+    EXPECT_EQ(0U, t0);
+}
+
 } /* anonymous namespace */

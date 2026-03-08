@@ -67,7 +67,13 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
             if (pool_out != NULL) { *pool_out = mgr->pools[i]; }
             return MEMPOOL_OK;
         }
-        /* Pool is full; try the next larger pool */
+        if (err != MEMPOOL_ERR_OUT_OF_MEMORY) {
+            /* Unexpected error (e.g. MEMPOOL_ERR_NOT_INITIALIZED indicates
+             * pool-state corruption).  Do not silently skip to the next pool;
+             * propagate the error so the caller can diagnose the root cause. */
+            return err;
+        }
+        /* Pool is exhausted; try the next larger pool. */
     }
 
     return found_candidate ? MEMPOOL_ERR_OUT_OF_MEMORY

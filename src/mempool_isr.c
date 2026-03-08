@@ -66,15 +66,10 @@ void mp_flush_isr_queue(mempool_t *pool)
          * double-free).  Discard the duplicate silently. */
         {
             uint32_t idx = mp_block_idx(pool, blk);
-            uint32_t bi  = idx >> 3U;
-            uint8_t  m   = (uint8_t)(1U << (idx & 7U));
-
-            if (bi < pool->bitmap_bytes) {
-                if ((pool->bitmap[bi] & m) == 0U) {
-                    continue; /* duplicate ISR free — discard */
-                }
-                pool->bitmap[bi] = (uint8_t)(pool->bitmap[bi] & (uint8_t)(~m));
+            if (!mp_bitmap_is_set(pool, idx)) {
+                continue; /* duplicate ISR free — discard */
             }
+            mp_bitmap_clear(pool, idx);
         }
 #endif
 
@@ -102,27 +97,13 @@ void mp_flush_isr_queue(mempool_t *pool)
 
 mempool_error_t mempool_free_from_isr(mempool_t *pool, void *block)
 {
-    uintptr_t ba, offset;
-
     if ((pool == NULL) || (block == NULL)) { return MEMPOOL_ERR_NULL_PTR; }
     if (pool->magic != MEMPOOL_MAGIC)      { return MEMPOOL_ERR_NOT_INITIALIZED; }
 
     /* Validate block before acquiring the ISR lock.  Pool geometry is
      * immutable after init so these reads are safe in ISR context. */
-    ba = (uintptr_t)block;
-    if ((ba < (uintptr_t)pool->blocks_start) ||
-        (ba >= (uintptr_t)pool->blocks_end)) {
+    if (mp_validate_block(pool, block) != MEMPOOL_OK) {
         return MEMPOOL_ERR_INVALID_BLOCK;
-    }
-    offset = ba - (uintptr_t)pool->blocks_start;
-    if (pool->block_shift != 0U) {
-        if ((offset & (((uintptr_t)1U << pool->block_shift) - 1U)) != 0U) {
-            return MEMPOOL_ERR_INVALID_BLOCK;
-        }
-    } else {
-        if ((offset % (uintptr_t)pool->block_size) != 0U) {
-            return MEMPOOL_ERR_INVALID_BLOCK;
-        }
     }
 
     MEMPOOL_ISR_LOCK();

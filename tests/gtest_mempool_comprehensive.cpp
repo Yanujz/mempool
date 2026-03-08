@@ -864,13 +864,13 @@ TEST(MempoolEdgeTests, BlockSizeEqualsFreeNodeSize) {
 
 TEST(MempoolEdgeTests, AlignmentEqualsBlockSize) {
     alignas(64) uint8_t state_buf[MEMPOOL_STATE_SIZE];
-    size_t pool_size = calc_min_pool_size(64, 64, 64);
-    std::vector<uint8_t> pool_buf(pool_size);
+    /* std::vector does not guarantee 64-byte alignment; use a static buffer. */
+    alignas(64) uint8_t pool_buf[MEMPOOL_POOL_BUFFER_SIZE(64, 64, 64)];
     mempool_t *pool = nullptr;
     
     ASSERT_EQ(MEMPOOL_OK, mempool_init(
         state_buf, sizeof(state_buf),
-        pool_buf.data(), pool_buf.size(),
+        pool_buf, sizeof(pool_buf),
         64, 64, &pool
     ));
     

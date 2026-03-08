@@ -12,8 +12,9 @@ extern "C" {
 
 /* Version info */
 #define MEMPOOL_VERSION_MAJOR 0
-#define MEMPOOL_VERSION_MINOR 4
+#define MEMPOOL_VERSION_MINOR 5
 #define MEMPOOL_VERSION_PATCH 0
+#define MEMPOOL_VERSION_STRING "0.5.0"
 
 /* -------------------------------------------------------------------------
  * Opaque pool handle (declared early so it can be used in callback types)
@@ -77,6 +78,10 @@ typedef void (*mempool_oom_hook_t)(mempool_t *pool, void *user_data);
  * the compile-time feature flags and returns the exact minimum size.
  * Returns 0 on invalid arguments (block_size==0, n==0, alignment not a
  * power of two).
+ *
+ * Complexity: **O(1)** — pure arithmetic with no loops or data-structure
+ * access; evaluates in a fixed number of machine instructions regardless
+ * of @p n.
  */
 size_t mempool_pool_buffer_size(size_t block_size, uint32_t n, size_t alignment);
 
@@ -108,6 +113,10 @@ size_t mempool_state_size(void);
 /**
  * Initialise a memory pool.
  *
+ * Complexity: **O(N)** where N = number of blocks that fit in
+ * @p pool_buffer_size.  Dominated by bitmap/tag `memset` and free-list
+ * construction.  Call once at startup; not suitable for hot paths.
+ *
  * @param state_buffer      Caller-provided storage for pool state; must be at
  *                          least mempool_state_size() bytes.
  * @param state_buffer_size Byte size of state_buffer.
@@ -129,16 +138,53 @@ mempool_error_t mempool_init(
     mempool_t  **pool_out
 );
 
-/** Allocate one block.  O(1). */
+/**
+ * Allocate one block.
+ *
+ * Complexity: **O(1)** — pops the head of the free-list (one pointer read and
+ * one pointer write).  No search, no traversal.  When
+ * `MEMPOOL_ENABLE_ISR_FREE` is set, pending deferred frees are drained first
+ * (at most `MEMPOOL_ISR_QUEUE_CAPACITY` entries, a compile-time constant;
+ * still O(1) with that constant as the WCET multiplier).
+ *
+ * @return MEMPOOL_OK on success, MEMPOOL_ERR_OUT_OF_MEMORY if the pool is
+ *         exhausted, MEMPOOL_ERR_NULL_PTR if either argument is NULL,
+ *         MEMPOOL_ERR_NOT_INITIALIZED if the pool handle is invalid.
+ */
 mempool_error_t mempool_alloc(mempool_t *pool, void **block);
 
-/** Allocate one block and zero-fill the user area.  O(1) + memset. */
+/**
+ * Allocate one block and zero-fill the user area.
+ *
+ * Complexity: **O(block_size)** — O(1) allocation followed by a
+ * `memset(0, block_size)` over the user area.
+ */
 mempool_error_t mempool_alloc_zero(mempool_t *pool, void **block);
 
-/** Return a block to the pool.  O(1). */
+/**
+ * Return a block to the pool.
+ *
+ * Complexity: **O(1)** — pointer range check, optional bitmap bit read/clear
+ * (array subscript + bitmask; no loop), optional canary read (one load),
+ * optional `memset` (O(block_size)), and free-list prepend (two pointer
+ * writes).  Every individual operation is bounded by a compile-time constant
+ * unrelated to the number of blocks in the pool.
+ *
+ * @return MEMPOOL_OK on success.  MEMPOOL_ERR_GUARD_CORRUPTED if the
+ *         post-canary was overwritten (block is quarantined, not returned
+ *         to the free list).  MEMPOOL_ERR_DOUBLE_FREE if the block was
+ *         already free.  MEMPOOL_ERR_INVALID_BLOCK if the pointer is outside
+ *         the pool or misaligned.
+ */
 mempool_error_t mempool_free(mempool_t *pool, void *block);
 
-/** Reset pool to initial state (all blocks free, stats zeroed). */
+/**
+ * Reset pool to initial state (all blocks free, stats zeroed).
+ *
+ * Complexity: **O(N)** where N = `total_blocks`, dominated by `memset` over
+ * the bitmap and/or tag array followed by O(N) free-list construction.
+ * Not suitable for use in a real-time interrupt handler.
+ */
 mempool_error_t mempool_reset(mempool_t *pool);
 
 /**
@@ -196,9 +242,13 @@ typedef void (*mempool_walk_fn_t)(const mempool_t *pool,
 /**
  * Iterate over every currently-allocated block and invoke @p fn for each.
  *
- * The task-level lock is held for the duration of the walk; @p fn must not
- * call back into this pool.  Requires MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
- * (the bitmap is used to identify which blocks are allocated).
+ * Complexity: **O(N)** where N = `total_blocks` (all bitmap bytes are scanned
+ * regardless of how many blocks are allocated).  The task-level lock is held
+ * for the entire walk; @p fn must not call back into this pool, and long
+ * callbacks will block all other pool users for O(N) time.
+ *
+ * Requires MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1 (the bitmap identifies which
+ * blocks are allocated).
  *
  * @param pool  Pool to walk.
  * @param fn    Callback invoked for each allocated block.
@@ -213,6 +263,15 @@ mempool_error_t mempool_walk(const mempool_t   *pool,
  * Return 1 if @p block is currently allocated, 0 if it is free or if
  * @p block does not address a valid block in @p pool.
  * Requires MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1.
+ *
+ * Complexity: **O(1)** — three sequential constant-time steps:
+ *   1. Range check: two pointer comparisons.
+ *   2. Index computation: one pointer subtraction followed by a single
+ *      right-shift (power-of-two stride) or integer divide (non-power-of-two
+ *      stride).  Either way: no loop, no data traversal.
+ *   3. Bitmap bit read: one array subscript (index >> 3) plus a bitmask
+ *      (1 << (index & 7)) and a single AND.  One byte of memory touched.
+ * Total: a fixed number of machine instructions, independent of pool size.
  */
 int mempool_is_block_allocated(const mempool_t *pool, const void *block);
 #endif /* MEMPOOL_ENABLE_DOUBLE_FREE_CHECK */
@@ -266,9 +325,14 @@ mempool_error_t mempool_get_block_tag(const mempool_t *pool, const void *block,
                                       uint32_t *tag_out);
 
 /**
- * Allocate a block and atomically set its tag.
- * Equivalent to mempool_alloc() followed by mempool_set_block_tag(), but
- * avoids a second bounds-check lookup.
+ * Allocate a block and immediately set its tag in a single call.
+ *
+ * Equivalent to mempool_alloc() followed by mempool_set_block_tag() but
+ * avoids a second index computation.  The allocation and the tag write use
+ * two separate critical sections (not a single atomic operation); the tag is
+ * set before this function returns, so callers that respect ownership (i.e.
+ * do not share the fresh block pointer before this call returns) observe a
+ * consistent tag.
  */
 mempool_error_t mempool_alloc_tagged(mempool_t *pool, void **block,
                                      uint32_t tag);
