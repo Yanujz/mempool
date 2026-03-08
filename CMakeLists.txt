@@ -13,9 +13,14 @@ option(MEMPOOL_ENABLE_TSAN       "Enable ThreadSanitizer (mutually exclusive wit
 option(MEMPOOL_ENABLE_COVERAGE   "Enable coverage instrumentation" ON)
 
 # Library feature toggles (passed as compile definitions)
-option(MEMPOOL_OPT_STATS            "Enable statistics tracking"      ON)
-option(MEMPOOL_OPT_DOUBLE_FREE_CHK  "Enable double-free detection"    ON)
-option(MEMPOOL_OPT_STRERROR         "Enable mempool_strerror()"       ON)
+option(MEMPOOL_OPT_STATS            "Enable statistics tracking"              ON)
+option(MEMPOOL_OPT_DOUBLE_FREE_CHK  "Enable double-free detection (bitmap)"   ON)
+option(MEMPOOL_OPT_STRERROR         "Enable mempool_strerror()"               ON)
+option(MEMPOOL_OPT_GUARD            "Enable post-canary buffer-overrun check"  OFF)
+option(MEMPOOL_OPT_POISON           "Enable alloc/free poison fill patterns"   OFF)
+option(MEMPOOL_OPT_OOM_HOOK         "Enable out-of-memory callback hook"       OFF)
+option(MEMPOOL_OPT_ISR_FREE         "Enable ISR-safe deferred-free queue"      OFF)
+option(MEMPOOL_OPT_TAGS             "Enable per-block 32-bit caller tags"      OFF)
 
 # Common warning flags
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -57,7 +62,7 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # Library
-add_library(mempool STATIC src/mempool.c)
+add_library(mempool STATIC src/mempool.c src/mempool_mgr.c)
 target_include_directories(mempool PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -66,6 +71,11 @@ target_compile_definitions(mempool PUBLIC
     MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
     MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
     MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+    MEMPOOL_ENABLE_GUARD=$<BOOL:${MEMPOOL_OPT_GUARD}>
+    MEMPOOL_ENABLE_POISON=$<BOOL:${MEMPOOL_OPT_POISON}>
+    MEMPOOL_ENABLE_OOM_HOOK=$<BOOL:${MEMPOOL_OPT_OOM_HOOK}>
+    MEMPOOL_ENABLE_ISR_FREE=$<BOOL:${MEMPOOL_OPT_ISR_FREE}>
+    MEMPOOL_ENABLE_TAGS=$<BOOL:${MEMPOOL_OPT_TAGS}>
 )
 
 # C test harness
@@ -109,6 +119,11 @@ target_compile_definitions(mempool_gtest PRIVATE
     MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
     MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
     MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+    MEMPOOL_ENABLE_GUARD=0
+    MEMPOOL_ENABLE_POISON=0
+    MEMPOOL_ENABLE_OOM_HOOK=0
+    MEMPOOL_ENABLE_ISR_FREE=0
+    MEMPOOL_ENABLE_TAGS=0
 )
 target_compile_options(mempool_gtest PRIVATE
     -include mempool_test_sync.h
@@ -133,6 +148,11 @@ target_compile_definitions(mempool_gtest_comprehensive PRIVATE
     MEMPOOL_ENABLE_STATS=$<BOOL:${MEMPOOL_OPT_STATS}>
     MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=$<BOOL:${MEMPOOL_OPT_DOUBLE_FREE_CHK}>
     MEMPOOL_ENABLE_STRERROR=$<BOOL:${MEMPOOL_OPT_STRERROR}>
+    MEMPOOL_ENABLE_GUARD=0
+    MEMPOOL_ENABLE_POISON=0
+    MEMPOOL_ENABLE_OOM_HOOK=0
+    MEMPOOL_ENABLE_ISR_FREE=0
+    MEMPOOL_ENABLE_TAGS=0
 )
 target_compile_options(mempool_gtest_comprehensive PRIVATE
     -include mempool_test_sync.h
@@ -146,6 +166,37 @@ target_link_libraries(mempool_gtest_comprehensive
 
 gtest_discover_tests(mempool_gtest_comprehensive)
 
+# Hardening test suite — exercises all new production-grade features
+add_executable(mempool_gtest_hardening
+    src/mempool.c
+    src/mempool_mgr.c
+    tests/gtest_mempool_hardening.cpp
+)
+target_include_directories(mempool_gtest_hardening PRIVATE include tests)
+target_compile_definitions(mempool_gtest_hardening PRIVATE
+    MEMPOOL_ENABLE_STATS=1
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_hardening PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_hardening
+    PRIVATE
+        GTest::gtest_main
+)
+
+gtest_discover_tests(mempool_gtest_hardening)
+
 add_test(NAME mempool_ctest COMMAND mempool_ctest)
 
 # Installation
@@ -153,7 +204,8 @@ install(TARGETS mempool
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
-install(FILES include/mempool.h include/mempool_cfg.h DESTINATION include)
+install(FILES include/mempool.h include/mempool_cfg.h include/mempool_mgr.h
+        DESTINATION include)
 
 # CPack packaging
 set(CPACK_GENERATOR "TGZ;ZIP")
