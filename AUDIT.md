@@ -2,7 +2,7 @@
 
 **Library:** `mempool` — deterministic O(1) memory pool for embedded and safety-critical systems  
 **Branch:** `feature/v2-optimized`  
-**Current version:** 0.5.0  
+**Current version:** 0.5.1  
 
 ---
 
@@ -15,7 +15,81 @@
 | 3 | Line-by-line invariant audit | 6 bugs (guard+poison missing on ISR drain, `mempool_reset()` ISR race, tag write outside lock, mgr accepts uninitialized handles, alloc_zero left `*block` non-NULL on error, `found_candidate` type) | 6 fixes; 16 new tests; 601 tests |
 | 4 | Free-path ordering audit | 4 bugs (mempool_free bitmap cleared before guard check, ISR double-free undetected, alloc/mgr_alloc stale `*block` on error) | 4 fixes; 10 new tests; 611 tests |
 | 5 | Code quality + ISR drain guard stats | 1 bug (ISR drain guard failure did not decrement `used_blocks`); refactored monolithic `mempool.c` into 3 focused translation units; added `mempool_pool_buffer_size()`, `mempool_walk()`, `mempool_is_block_allocated()` | 1 fix; split; new APIs; 611 tests |
-| 6 (this pass) | Cross-unit deduplication, type-safety, tag lifetime, error propagation, documentation | 5 bugs (see below); Doxyfile; README overhaul with porting guide + O(1) proofs | 5 fixes; 2 new tests; 613 tests |
+| 6 | Cross-unit deduplication, type-safety, tag lifetime, error propagation, documentation | 5 bugs (see Pass 6 section); Doxyfile; README overhaul with porting guide + O(1) proofs | 5 fixes; 2 new tests; 613 tests |
+| 7 (this pass) | Tag lifetime, mgr state corruption, `mp_log2` performance, API completeness, examples | 4 bugs (see Pass 7 section); `mempool_has_free_block()`; `__builtin_ctz`; example fixes | 4 fixes; 5 new tests; 617 tests |
+
+---
+
+## Pass 7 Bug Findings
+
+### Bug 7.1 — `mempool_set_block_tag` allowed writing tags to freed blocks
+**File:** `src/mempool_diag.c`  
+**Severity:** Medium (stale tag visible to next allocator)
+
+When `MEMPOOL_ENABLE_TAGS=1` and `MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1`,
+`mempool_set_block_tag` did not check whether the target block was currently
+allocated.  A caller could write a tag to a freed block, and the pass 6 fix
+that clears tags on `mempool_free` only cleared whatever was there at free
+time — it could not defend against a tag written _after_ the free.  The next
+allocator would see this tag as if it had been set by the previous owner.
+
+**Fix:** Added a `mp_bitmap_is_set(pool, idx)` check inside the lock in
+`mempool_set_block_tag`.  If the block is not allocated (bit = 0), the
+function returns `MEMPOOL_ERR_INVALID_BLOCK` immediately.
+
+---
+
+### Bug 7.2 — `mempool_get_block_tag` allowed reading tags from freed blocks
+**File:** `src/mempool_diag.c`  
+**Severity:** Low (incorrect data returned, no corruption)
+
+The symmetric counterpart of Bug 7.1: `mempool_get_block_tag` had no
+allocation check.  Calling it on a freed block returned the tag that
+`mempool_free` had just written (0) rather than signalling that the block
+is not owned by anyone.  Callers using tags for ownership tracking could
+receive misleadingly valid-looking data.
+
+**Fix:** Same `mp_bitmap_is_set` check added inside the lock in
+`mempool_get_block_tag`.
+
+---
+
+### Bug 7.3 — `mempool_mgr_alloc` / `mempool_mgr_free` unguarded `mgr->count`
+**File:** `src/mempool_mgr.c`  
+**Severity:** High (out-of-bounds array access under state corruption)
+
+`mempool_mgr_init` validates that `count <= MEMPOOL_MGR_MAX_POOLS` at init
+time.  However, if the `mempool_mgr_t` struct is later overwritten by a
+stack or heap corruption, `mgr->count` could hold an arbitrarily large value.
+The `for (i = 0; i < mgr->count; i++)` loops in `mempool_mgr_alloc` and
+`mempool_mgr_free` would then walk past the `mgr->pools[]` array, causing
+reads from (or writes to) arbitrary memory.
+
+**Fix:** Added `if (mgr->count > (uint32_t)MEMPOOL_MGR_MAX_POOLS) return
+MEMPOOL_ERR_INVALID_SIZE;` at the top of both functions, after the NULL
+check.  This bounds the loop regardless of what a corrupted count field
+contains.
+
+---
+
+### Bug 7.4 — Examples used undersized pool buffers
+**File:** `examples/embedded_example.c`, `examples/basic_usage.c`,
+`examples/stress_test.c`  
+**Severity:** Low (documentation/example correctness)
+
+`embedded_example.c` allocated `pool_buf[PACKET_SIZE * MAX_PACKETS]` (4096 B)
+for 16 packets.  With all features enabled (guard canary + bitmap + tags),
+each block's stride is 264 bytes and the overhead adds ~72 bytes, requiring
+≥ 4296 bytes.  The 4096 B buffer would cause `mempool_init` to fit fewer than
+the expected 16 blocks with no error message.  Additionally, the file had
+`// #include <stdint.h>` as a dead comment, relying on the transitive include
+through `mempool.h`.
+
+**Fix:** All three example files now use `MEMPOOL_POOL_BUFFER_SIZE(block_size,
+num_blocks, alignment)` for their pool buffers, which computes the correct
+worst-case size regardless of which features are active.  The dead comment in
+`embedded_example.c` was replaced with an active include.  The hardcoded `8U`
+alignment literal was replaced with a named `POOL_ALIGN` constant.
 
 ---
 
@@ -269,12 +343,18 @@ Violating this order (e.g. clearing the bitmap before the guard check) creates a
 
 A bitmap bit is 1 if and only if the corresponding block is **in use** (allocated or quarantined due to guard corruption). It is never 0 for a quarantined block.
 
-### Tag invariant (pass 6 addition)
+### Tag invariant (pass 6 + pass 7 extension)
 
 After `mempool_free()` the tag for the freed block is always 0.  After
 `mempool_init()` and `mempool_reset()` all tags are 0 (bitmap `memset`).
 Invariant: a freshly allocated block always has `get_block_tag() == 0` unless
 the caller explicitly sets a tag after allocation.
+
+**Pass 7 extension:** When `MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1`, both
+`mempool_set_block_tag` and `mempool_get_block_tag` verify that the block's
+bitmap bit is 1 (i.e., the block is currently allocated) before performing
+any read or write.  This prevents a post-free tag write from corrupting the
+invariant and prevents `get_block_tag` from returning stale data after a free.
 
 ### ISR queue invariant
 
@@ -284,7 +364,37 @@ If `MEMPOOL_LOCK` and `MEMPOOL_ISR_LOCK` map to the same mutex, `mp_flush_isr_qu
 
 ---
 
-## Feature Overhead Matrix
+## Pass 7 Improvements
+
+### Improvement 7.A — `mp_log2` uses `__builtin_ctz` on GCC/Clang
+**File:** `src/mempool_internal.h`
+
+The previous `mp_log2` implementation used a `while (v > 1)` loop of up to
+32 iterations.  Although this function is called only during `mempool_init`
+(not a hot path), replacing it with `__builtin_ctz(v)` — which maps to a
+single `BSF`/`CTZ` instruction on x86 and ARM — removes a loop that would
+show up as a WCET outlier in static analysis tools.  A plain C fallback is
+retained for compilers without `__builtin_ctz`.
+
+### Improvement 7.B — `mempool_has_free_block()` API
+**File:** `include/mempool.h`, `src/mempool_diag.c`
+
+Added `int mempool_has_free_block(const mempool_t *pool)`:
+
+- **O(1)**: single pointer comparison `pool->free_list != NULL`.
+- **Always available**: no feature flags required (unlike `mempool_get_stats`).
+- **ISR-friendly**: no lock taken (free-list pointer read is atomic on all
+  mainstream architectures when word-aligned).
+- **Use case**: guard an allocation in a tight loop without the overhead of a
+  full stats snapshot.
+
+Complexity table update:
+
+| Function | Complexity | Notes |
+|----------|-----------|-------|
+| `mempool_has_free_block` | **O(1)** | Single pointer load |
+
+---
 
 Feature overheads per pool (64-bit host, GUARD ON, ISR_QUEUE_CAPACITY=8):
 
@@ -322,6 +432,9 @@ Feature overheads per pool (64-bit host, GUARD ON, ISR_QUEUE_CAPACITY=8):
 | Uninitialized pool handle | Magic sentinel `0xA5C3` checked on every public call | `MEMPOOL_ERR_NOT_INITIALIZED` |
 | ISR queue index truncation | `_Static_assert(MEMPOOL_ISR_QUEUE_CAPACITY <= 255)` | Compile error if misconfigured |
 | State buffer too small | `_Static_assert(MEMPOOL_STATE_SIZE >= sizeof(struct mempool))` | Compile error if misconfigured |
+| Tag written to freed block | Bitmap check in `mempool_set_block_tag` (pass 7) | `MEMPOOL_ERR_INVALID_BLOCK` |
+| Tag read from freed block | Bitmap check in `mempool_get_block_tag` (pass 7) | `MEMPOOL_ERR_INVALID_BLOCK` |
+| Corrupted `mgr->count` field | Bounds check in `mempool_mgr_alloc/free` (pass 7) | `MEMPOOL_ERR_INVALID_SIZE` |
 
 ### What mempool does NOT protect against
 
@@ -375,12 +488,12 @@ All features default to OFF except `STATS`, `DOUBLE_FREE_CHECK`, and `STRERROR`.
 
 | Test target | Feature configuration | Test count |
 |-------------|----------------------|------------|
-| `mempool_gtest` | STATS+DOUBLE_FREE+STRERROR; others OFF | ~120 |
-| `mempool_gtest_comprehensive` | Same as above | ~480 |
-| `mempool_gtest_hardening` | All features ON | ~422 |
+| `mempool_gtest` | STATS+DOUBLE_FREE+STRERROR; others OFF | 17 |
+| `mempool_gtest_comprehensive` | Same as above | 515 |
+| `mempool_gtest_hardening` | All features ON | 79 |
 | `mempool_gtest_mgr_nostats` | All features ON except STATS=0 | 6 |
 | `mempool_ctest` | C test harness | 1 |
-| **Total** | | **613** |
+| **Total** | | **617** |
 
 All tests pass on macOS (Apple Clang, `-fsanitize=address,undefined`) and the build is warning-free at `-Wall -Wextra -Wpedantic -Wconversion`.
 

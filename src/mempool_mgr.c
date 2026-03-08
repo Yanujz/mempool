@@ -54,6 +54,10 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
     if ((mgr == NULL) || (block == NULL)) {
         return MEMPOOL_ERR_NULL_PTR;
     }
+    /* Guard against corrupted count field causing out-of-bounds array access. */
+    if (mgr->count > (uint32_t)MEMPOOL_MGR_MAX_POOLS) {
+        return MEMPOOL_ERR_INVALID_SIZE;
+    }
     *block = NULL; /* always clear so callers never see a stale pointer */
 
     for (i = 0U; i < mgr->count; i++) {
@@ -86,6 +90,10 @@ mempool_error_t mempool_mgr_free(mempool_mgr_t *mgr, void *block)
 
     if ((mgr == NULL) || (block == NULL)) {
         return MEMPOOL_ERR_NULL_PTR;
+    }
+    /* Guard against corrupted count field causing out-of-bounds array access. */
+    if (mgr->count > (uint32_t)MEMPOOL_MGR_MAX_POOLS) {
+        return MEMPOOL_ERR_INVALID_SIZE;
     }
 
     for (i = 0U; i < mgr->count; i++) {

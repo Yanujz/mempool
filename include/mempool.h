@@ -13,8 +13,8 @@ extern "C" {
 /* Version info */
 #define MEMPOOL_VERSION_MAJOR 0
 #define MEMPOOL_VERSION_MINOR 5
-#define MEMPOOL_VERSION_PATCH 0
-#define MEMPOOL_VERSION_STRING "0.5.0"
+#define MEMPOOL_VERSION_PATCH 1
+#define MEMPOOL_VERSION_STRING "0.5.1"
 
 /* -------------------------------------------------------------------------
  * Opaque pool handle (declared early so it can be used in callback types)
@@ -275,6 +275,28 @@ mempool_error_t mempool_walk(const mempool_t   *pool,
  */
 int mempool_is_block_allocated(const mempool_t *pool, const void *block);
 #endif /* MEMPOOL_ENABLE_DOUBLE_FREE_CHECK */
+
+/**
+ * Return 1 if at least one block is available for allocation, 0 otherwise.
+ * Returns 0 also when @p pool is NULL or not initialised.
+ *
+ * This is the lightest possible availability test — it does not require
+ * MEMPOOL_ENABLE_STATS and has no side effects.
+ *
+ * Complexity: **O(1)** — single pointer comparison against NULL.
+ *   The free-list head is maintained by every alloc/free path; this function
+ *   only reads it.  No memory traversal, no arithmetic.
+ *
+ * Typical use: guard an allocation in a tight ISR or task loop without
+ * paying the overhead of a full stats snapshot.
+ *
+ * @code
+ *   if (mempool_has_free_block(pool)) {
+ *       (void)mempool_alloc(pool, &buf);
+ *   }
+ * @endcode
+ */
+int mempool_has_free_block(const mempool_t *pool);
 
 /* -------------------------------------------------------------------------
  * Statistics

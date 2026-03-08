@@ -72,6 +72,14 @@ mempool_error_t mempool_set_block_tag(mempool_t *pool, void *block,
     idx = mp_block_idx(pool, block);
 
     MEMPOOL_LOCK();
+#if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
+    /* Reject tag writes to freed blocks.  A freed block's bitmap bit is 0;
+     * writing a tag to it would make the tag visible to the next allocator. */
+    if (!mp_bitmap_is_set(pool, idx)) {
+        MEMPOOL_UNLOCK();
+        return MEMPOOL_ERR_INVALID_BLOCK;
+    }
+#endif
     pool->tags[idx] = tag;
     MEMPOOL_UNLOCK();
     return MEMPOOL_OK;
@@ -93,6 +101,13 @@ mempool_error_t mempool_get_block_tag(const mempool_t *pool, const void *block,
     idx = mp_block_idx(pool, block);
 
     MEMPOOL_LOCK();
+#if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
+    /* Reject tag reads from freed blocks to prevent returning stale data. */
+    if (!mp_bitmap_is_set(pool, idx)) {
+        MEMPOOL_UNLOCK();
+        return MEMPOOL_ERR_INVALID_BLOCK;
+    }
+#endif
     *tag_out = pool->tags[idx];
     MEMPOOL_UNLOCK();
     return MEMPOOL_OK;
@@ -200,6 +215,12 @@ int mempool_is_block_allocated(const mempool_t *pool, const void *block)
     return mp_bitmap_is_set(pool, idx);
 }
 #endif /* MEMPOOL_ENABLE_DOUBLE_FREE_CHECK */
+
+int mempool_has_free_block(const mempool_t *pool)
+{
+    if ((pool == NULL) || (pool->magic != MEMPOOL_MAGIC)) { return 0; }
+    return (pool->free_list != NULL) ? 1 : 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Error strings                                                       */

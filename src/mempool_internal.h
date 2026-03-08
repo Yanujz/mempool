@@ -92,9 +92,16 @@ static inline size_t mp_align_up(size_t v, size_t a)
 
 static inline uint8_t mp_log2(uint32_t v)
 {
+#if defined(__GNUC__) || defined(__clang__)
+    /* __builtin_ctz gives the number of trailing zero bits, which equals
+     * log2 for power-of-two values (the only inputs this function receives).
+     * This resolves to a single BSF/CTZ instruction on x86/ARM. */
+    return (v == 0U) ? 0U : (uint8_t)__builtin_ctz(v);
+#else
     uint8_t s = 0U;
     while (v > 1U) { v >>= 1U; s++; }
     return s;
+#endif
 }
 
 /* ------------------------------------------------------------------ */

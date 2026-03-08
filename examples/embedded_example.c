@@ -1,9 +1,10 @@
 #include <stdio.h>
-// #include <stdint.h>
+#include <stdint.h>
 #include "mempool.h"
 
-#define PACKET_SIZE 256U
-#define MAX_PACKETS 16U
+#define PACKET_SIZE  256U
+#define MAX_PACKETS  16U
+#define POOL_ALIGN   8U
 
 typedef struct {
     uint8_t  data[PACKET_SIZE];
@@ -11,8 +12,18 @@ typedef struct {
     uint32_t timestamp;
 } packet_t;
 
-static uint8_t state_buf[MEMPOOL_STATE_SIZE] __attribute__((aligned(8)));
-static uint8_t pool_buf[PACKET_SIZE * MAX_PACKETS] __attribute__((aligned(8)));
+/*
+ * Use MEMPOOL_POOL_BUFFER_SIZE to size the pool buffer correctly even when
+ * optional features (guard canaries, tags, bitmap) are all active.  A plain
+ * PACKET_SIZE * MAX_PACKETS would underestimate the required space whenever
+ * those features add per-block overhead.
+ */
+static uint8_t state_buf[MEMPOOL_STATE_SIZE]
+    __attribute__((aligned(POOL_ALIGN)));
+static uint8_t pool_buf[MEMPOOL_POOL_BUFFER_SIZE(sizeof(packet_t),
+                                                  MAX_PACKETS,
+                                                  POOL_ALIGN)]
+    __attribute__((aligned(POOL_ALIGN)));
 
 int main(void)
 {
@@ -31,7 +42,7 @@ int main(void)
 
     err = mempool_init(state_buf, sizeof(state_buf),
                        pool_buf, sizeof(pool_buf),
-                       sizeof(packet_t), 8U,
+                       sizeof(packet_t), POOL_ALIGN,
                        &pool);
     if (err != MEMPOOL_OK) {
         printf("mempool_init failed: %s\n", mempool_strerror(err));
