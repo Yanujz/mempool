@@ -1,7 +1,7 @@
 /*
- * Hardening test suite for mempool v0.4.0
+ * Hardening test suite for mempool v0.5.1
  *
- * Exercises all production-grade features added in 0.4.0:
+ * Exercises all production-grade features added in 0.4.0–0.5.1:
  *   - Guard canary write / validate / violation detection
  *   - Poison fill on alloc and free
  *   - OOM hook invocation
@@ -10,6 +10,8 @@
  *   - mempool_alloc_zero
  *   - mempool_reset_stats (sticky peak)
  *   - Pool-of-pools manager (mempool_mgr)
+ *   - Tag-on-freed-block rejection (set/get)
+ *   - mempool_has_free_block() O(1) availability query
  *
  * All features are compiled IN for this test binary (see CMakeLists.txt).
  */
@@ -1445,6 +1447,88 @@ TEST(TagClearedOnFreeTest, PlainAllocSeesFreshTag) {
     uint32_t t0 = 0xDEADU;
     ASSERT_EQ(MEMPOOL_OK, mempool_get_block_tag(pool, b0, &t0));
     EXPECT_EQ(0U, t0);
+}
+
+/* -----------------------------------------------------------------------
+ * TagOnFreedBlockTest — writing / reading tags on freed blocks must fail
+ * --------------------------------------------------------------------- */
+TEST(TagOnFreedBlockTest, SetTagOnFreedBlockIsRejected) {
+    /* Ensure that set_block_tag on a freed block returns INVALID_BLOCK.
+     * Without this check the stale tag would be visible to the next
+     * allocator even if mempool_free cleared its own copy. */
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+    /* Write a tag while block is allocated — must succeed. */
+    ASSERT_EQ(MEMPOOL_OK, mempool_set_block_tag(pool, blk, 0xCAFEU));
+    /* Free the block. */
+    ASSERT_EQ(MEMPOOL_OK, mempool_free(pool, blk));
+    /* Writing a tag to a freed block must now be rejected. */
+    EXPECT_EQ(MEMPOOL_ERR_INVALID_BLOCK,
+              mempool_set_block_tag(pool, blk, 0xDEADU));
+}
+
+TEST(TagOnFreedBlockTest, GetTagOnFreedBlockIsRejected) {
+    /* get_block_tag on a freed block must return INVALID_BLOCK, not a
+     * stale value from a previous owner. */
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+    ASSERT_EQ(MEMPOOL_OK, mempool_set_block_tag(pool, blk, 0xABCDU));
+    ASSERT_EQ(MEMPOOL_OK, mempool_free(pool, blk));
+    uint32_t out = 0xFFFFFFFFU;
+    EXPECT_EQ(MEMPOOL_ERR_INVALID_BLOCK,
+              mempool_get_block_tag(pool, blk, &out));
+    /* out must remain unchanged since the call failed. */
+    EXPECT_EQ(0xFFFFFFFFU, out);
+}
+
+/* -----------------------------------------------------------------------
+ * HasFreeBlockTest — mempool_has_free_block() basic coverage
+ * --------------------------------------------------------------------- */
+TEST(HasFreeBlockTest, FullPoolReturnsFalse) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    /* Exhaust the pool regardless of how many blocks actually fit. */
+    void *saved = nullptr;
+    while (true) {
+        void *b = nullptr;
+        if (mempool_alloc(pool, &b) != MEMPOOL_OK) { break; }
+        if (saved == nullptr) { saved = b; }
+    }
+    EXPECT_EQ(0, mempool_has_free_block(pool));
+
+    /* Free one block — pool becomes available again. */
+    ASSERT_NE(nullptr, saved);
+    ASSERT_EQ(MEMPOOL_OK, mempool_free(pool, saved));
+    EXPECT_EQ(1, mempool_has_free_block(pool));
+}
+
+TEST(HasFreeBlockTest, FreshPoolReturnsTrue) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+    EXPECT_EQ(1, mempool_has_free_block(pool));
+}
+
+TEST(HasFreeBlockTest, NullPoolReturnsFalse) {
+    EXPECT_EQ(0, mempool_has_free_block(nullptr));
 }
 
 } /* anonymous namespace */
