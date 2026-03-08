@@ -62,6 +62,18 @@ TEST(NoStatsBlockInfo, BlockSizeAndCapacityReturnSaneValues) {
     EXPECT_EQ(0U, mempool_capacity(nullptr));
 }
 
+TEST(NoStatsBlockInfo, IsInitializedDetectsValidPool) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for_nostats(32U, 4U)]{};
+
+    EXPECT_EQ(0, mempool_is_initialized(nullptr));
+    EXPECT_EQ(0, mempool_is_initialized(reinterpret_cast<mempool_t*>(state)));
+
+    mempool_t *pool = make_pool(state, sizeof state, pbuf, sizeof pbuf, 32U);
+    ASSERT_NE(nullptr, pool);
+    EXPECT_EQ(1, mempool_is_initialized(pool));
+}
+
 /* -----------------------------------------------------------------------
  * mempool_mgr — no-stats build (exercises the mgr_sort + alloc path that
  * previously called mempool_get_stats() unconditionally)

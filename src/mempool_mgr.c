@@ -32,6 +32,9 @@ mempool_error_t mempool_mgr_init(mempool_mgr_t *mgr,
     }
     for (i = 0U; i < count; i++) {
         if (pools[i] == NULL) { return MEMPOOL_ERR_NULL_PTR; }
+        if (!mempool_is_initialized(pools[i])) {
+            return MEMPOOL_ERR_NOT_INITIALIZED;
+        }
         mgr->pools[i] = pools[i];
     }
     mgr->count = count;
@@ -46,7 +49,7 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
                                   mempool_t    **pool_out)
 {
     uint32_t i;
-    int      found_candidate = 0;
+    uint32_t found_candidate = 0U;
 
     if ((mgr == NULL) || (block == NULL)) {
         return MEMPOOL_ERR_NULL_PTR;
@@ -57,7 +60,7 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
 
         if ((size_t)mempool_block_size(mgr->pools[i]) < min_size) { continue; }
 
-        found_candidate = 1;
+        found_candidate = 1U;
         err = mempool_alloc(mgr->pools[i], block);
         if (err == MEMPOOL_OK) {
             if (pool_out != NULL) { *pool_out = mgr->pools[i]; }

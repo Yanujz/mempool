@@ -47,7 +47,7 @@ typedef struct {
     uint32_t peak_usage;        /**< High-water mark of used_blocks (sticky)     */
     uint32_t alloc_count;       /**< Lifetime successful allocations             */
     uint32_t free_count;        /**< Lifetime successful frees                   */
-    uint32_t block_size;        /**< Per-block stride in bytes (aligned)         */
+    uint32_t block_size;        /**< Per-block stride in bytes (includes 4-byte guard canary when MEMPOOL_ENABLE_GUARD is ON) */
 #if MEMPOOL_ENABLE_GUARD
     uint32_t guard_violations;  /**< Canary corruptions detected at free time    */
 #endif
@@ -116,6 +116,16 @@ mempool_error_t mempool_reset(mempool_t *pool);
  * @return 1 if yes, 0 if no (or on invalid arguments).
  */
 int mempool_contains(const mempool_t *pool, const void *ptr);
+
+/**
+ * Return 1 if @p pool points to a successfully initialised pool, 0 otherwise.
+ *
+ * This is a lightweight magic-sentinel check.  Use it to validate pool handles
+ * before passing them to other APIs (e.g. mempool_mgr_init()).
+ *
+ * @return 1 if initialised, 0 if NULL / uninitialised / corrupted.
+ */
+int mempool_is_initialized(const mempool_t *pool);
 
 /**
  * Return the per-block stride in bytes.

@@ -163,10 +163,28 @@ static void mp_flush_isr_queue(mempool_t *pool)
         pool->isr_count--;
         MEMPOOL_ISR_UNLOCK();
 
+#if MEMPOOL_ENABLE_GUARD
+        /* Validate post-canary before touching the block.  A guard failure
+         * here means a buffer overrun went via the ISR-free path.  The block
+         * is withdrawn from circulation (not added back to the free list).
+         * The bitmap bit is left SET so a subsequent mempool_free() returns
+         * MEMPOOL_ERR_DOUBLE_FREE rather than silently adding it again. */
+        {
+            const uint32_t *canary = (const uint32_t *)(const void *)
+                                     ((const uint8_t *)blk + pool->user_block_size);
+            if (*canary != (uint32_t)MEMPOOL_CANARY_VALUE) {
+#if MEMPOOL_ENABLE_STATS
+                pool->stats.guard_violations++;
+#endif
+                continue; /* block is unsafe; leave bitmap bit SET */
+            }
+        }
+#endif /* MEMPOOL_ENABLE_GUARD */
+
 #if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
-        /* Clear the allocation bit so a subsequent mempool_free() on the same
-         * block is correctly detected as a double-free rather than silently
-         * adding the block to the free list a second time. */
+        /* Clear the allocation bit only for valid (non-guard-violated) blocks.
+         * A subsequent mempool_free() on this block will then see the bit
+         * cleared and correctly return MEMPOOL_ERR_DOUBLE_FREE. */
         {
             uint32_t idx = mp_block_idx(pool, blk);
             uint32_t bi  = idx >> 3U;
@@ -175,6 +193,12 @@ static void mp_flush_isr_queue(mempool_t *pool)
                 pool->bitmap[bi] = (uint8_t)(pool->bitmap[bi] & (uint8_t)(~m));
             }
         }
+#endif
+
+#if MEMPOOL_ENABLE_POISON
+        /* Poison user area; free-list next pointer is written below and
+         * overwrites the first sizeof(void*) bytes of the pattern. */
+        memset(blk, (int)(uint8_t)MEMPOOL_FREE_POISON_BYTE, mp_user_size(pool));
 #endif
 
         nd       = (free_node_t *)blk;
@@ -396,7 +420,18 @@ mempool_error_t mempool_alloc(mempool_t *pool, void **block)
 
 mempool_error_t mempool_alloc_zero(mempool_t *pool, void **block)
 {
-    mempool_error_t err = mempool_alloc(pool, block);
+    mempool_error_t err;
+
+    if (block == NULL) {
+        return MEMPOOL_ERR_NULL_PTR;
+    }
+    *block = NULL; /* clear defensively so caller never sees a stale pointer */
+
+    if (pool == NULL) {
+        return MEMPOOL_ERR_NULL_PTR;
+    }
+
+    err = mempool_alloc(pool, block);
     if (err == MEMPOOL_OK) {
         memset(*block, 0, mp_user_size(pool));
     }
@@ -555,8 +590,11 @@ mempool_error_t mempool_alloc_tagged(mempool_t *pool, void **block,
     mempool_error_t err = mempool_alloc(pool, block);
     if (err == MEMPOOL_OK) {
         uint32_t idx = mp_block_idx(pool, *block);
-        /* No extra lock needed: caller owns the block, tag array is per-block */
+        /* Lock to prevent a concurrent mempool_get_block_tag() from reading
+         * a partially-written or stale tag value for this block index. */
+        MEMPOOL_LOCK();
         pool->tags[idx] = tag;
+        MEMPOOL_UNLOCK();
     }
     return err;
 }
@@ -670,9 +708,14 @@ mempool_error_t mempool_reset(mempool_t *pool)
 #endif
 
 #if MEMPOOL_ENABLE_ISR_FREE
+    /* Zero the ISR queue under BOTH locks: the task lock (already held) and
+     * the ISR lock, to prevent a concurrent ISR from observing a half-reset
+     * queue state (e.g. isr_count = 0 while isr_tail is still non-zero). */
+    MEMPOOL_ISR_LOCK();
     pool->isr_head  = 0U;
     pool->isr_tail  = 0U;
     pool->isr_count = 0U;
+    MEMPOOL_ISR_UNLOCK();
 #endif
 
     {
@@ -714,6 +757,11 @@ int mempool_contains(const mempool_t *pool, const void *ptr)
     p = (uintptr_t)ptr;
     return (p >= (uintptr_t)pool->blocks_start) &&
            (p <  (uintptr_t)pool->blocks_end);
+}
+
+int mempool_is_initialized(const mempool_t *pool)
+{
+    return (pool != NULL) && (pool->magic == MEMPOOL_MAGIC);
 }
 
 uint32_t mempool_block_size(const mempool_t *pool)
