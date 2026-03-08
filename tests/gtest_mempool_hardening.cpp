@@ -786,7 +786,10 @@ TEST_F(IsrBitmapTest, PoolRemainsConsistentAfterIsrDrain) {
     for (uint32_t i = 0U; i < cap; i++) {
         ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blks[i]));
     }
-    EXPECT_EQ(MEMPOOL_ERR_OUT_OF_MEMORY, mempool_alloc(pool, &blks[0]));
+    {
+        void *tmp = nullptr;
+        EXPECT_EQ(MEMPOOL_ERR_OUT_OF_MEMORY, mempool_alloc(pool, &tmp));
+    }
 
     for (uint32_t i = 0U; i < cap; i++) {
         ASSERT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blks[i]));
@@ -1001,6 +1004,210 @@ TEST(AllocZeroNullOnErrorTest, NullPoolSetsBlockNull) {
     void *blk = reinterpret_cast<void*>(0xDEADDEADUL);
     EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_alloc_zero(nullptr, &blk));
     EXPECT_EQ(nullptr, blk);
+}
+
+/* ====================================================================
+ * AUDIT PASS 4 — Fix verifications
+ * ==================================================================== */
+
+/* -------------------------------------------------------------------- *
+ *  mempool_free() — guard check must precede bitmap clear               *
+ *  A guard-corrupted block must:                                        *
+ *   (a) return MEMPOOL_ERR_GUARD_CORRUPTED                             *
+ *   (b) leave the bitmap bit SET (block quarantined, not "free")       *
+ *       The canary remains broken → every subsequent free also returns  *
+ *       GUARD_CORRUPTED (guard fires before double-free check), which  *
+ *       prevents the block from ever being accidentally added to the   *
+ *       free list.                                                      *
+ *   (c) decrement stats.used_blocks                                    *
+ *   (d) the pool's free_blocks count must NOT increase after quarantine *
+ * -------------------------------------------------------------------- */
+TEST(GuardBitmapConsistencyTest, GuardCorruptedLeaveBitmapSet) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    uint32_t cap = mempool_capacity(pool);
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+    ASSERT_NE(nullptr, blk);
+
+    mempool_stats_t before{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &before));
+    uint32_t free_before = before.free_blocks;
+
+    /* Corrupt the post-canary word — canary sits at byte offset equal to the
+     * user block size (32), not the full stride. */
+    static constexpr size_t USER_BLOCK = 32U;
+    uint32_t *canary = reinterpret_cast<uint32_t *>(
+            static_cast<uint8_t *>(blk) + USER_BLOCK);
+    *canary ^= 0xFFFFFFFFU;
+
+    /* First free: must return GUARD_CORRUPTED */
+    EXPECT_EQ(MEMPOOL_ERR_GUARD_CORRUPTED, mempool_free(pool, blk));
+
+    /* The bitmap bit is still SET: guard fires before double-free check, so
+     * a second free also returns GUARD_CORRUPTED (not DOUBLE_FREE).  This
+     * is correct — the block is permanently quarantined. */
+    EXPECT_EQ(MEMPOOL_ERR_GUARD_CORRUPTED, mempool_free(pool, blk));
+
+    /* free_blocks must NOT increase — the block was never added to the free list */
+    mempool_stats_t after{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &after));
+    EXPECT_EQ(free_before, after.free_blocks);
+    EXPECT_EQ(cap - 1U, after.free_blocks + after.used_blocks);
+}
+
+TEST(GuardBitmapConsistencyTest, GuardCorruptedDecrementsUsedBlocks) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+
+    mempool_stats_t before{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &before));
+    EXPECT_EQ(1U, before.used_blocks);
+
+    /* Corrupt canary — at byte offset 32 (user block size) */
+    static constexpr size_t USER_BLOCK2 = 32U;
+    *reinterpret_cast<uint32_t *>(
+            static_cast<uint8_t *>(blk) + USER_BLOCK2) ^= 0xFFFFFFFFU;
+
+    EXPECT_EQ(MEMPOOL_ERR_GUARD_CORRUPTED, mempool_free(pool, blk));
+
+    mempool_stats_t after{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &after));
+    EXPECT_EQ(0U, after.used_blocks);          /* decremented on quarantine */
+    EXPECT_EQ(1U, after.guard_violations);
+}
+
+/* -------------------------------------------------------------------- *
+ *  mp_flush_isr_queue() — ISR double-free must be discarded            *
+ *  Queuing the same block twice via mempool_free_from_isr() must not   *
+ *  corrupt the free list; the duplicate is silently discarded on drain. *
+ * -------------------------------------------------------------------- */
+TEST(IsrDoubleFreeTest, DuplicateIsrFreeDiscarded) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    uint32_t cap = mempool_capacity(pool);
+
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+
+    /* Queue the same block twice from ISR context */
+    EXPECT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blk));
+    EXPECT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blk));
+
+    /* Drain — should silently drop the duplicate */
+    mempool_drain_isr_queue(pool);
+
+    mempool_stats_t s{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &s));
+    EXPECT_EQ(0U,   s.used_blocks); /* block was logically freed exactly once */
+    EXPECT_EQ(cap, s.free_blocks); /* all cap blocks are now free — NOT cap+1 */
+
+    /* The block must be normally allocatable exactly once after drain */
+    void *blk2 = nullptr;
+    EXPECT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk2));
+    EXPECT_EQ(blk, blk2);          /* LIFO: same block comes back first */
+
+    /* Pool should have (cap-1) more allocatable blocks, not (cap) */
+    std::vector<void*> rest;
+    mempool_error_t err = MEMPOOL_OK;
+    while (err == MEMPOOL_OK) {
+        void *b = nullptr;
+        err = mempool_alloc(pool, &b);
+        if (err == MEMPOOL_OK) { rest.push_back(b); }
+    }
+    /* We already hold blk2, so max additional = cap-1 */
+    EXPECT_EQ(cap - 1U, static_cast<uint32_t>(rest.size()));
+
+    mempool_free(pool, blk2);
+    for (auto b : rest) { mempool_free(pool, b); }
+}
+
+/* -------------------------------------------------------------------- *
+ *  mempool_alloc() — *block must be NULL on every error path           *
+ * -------------------------------------------------------------------- */
+TEST(AllocNullOnErrorTest, NotInitializedClearsBlock) {
+    /* Pass null pool — ensures *block is cleared even without an initialized pool */
+    void *blk = reinterpret_cast<void *>(0xDEADBEEFUL);
+    EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_alloc(nullptr, &blk));
+    EXPECT_EQ(nullptr, blk);
+}
+
+TEST(AllocNullOnErrorTest, OomClearsBlock) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    uint32_t cap = mempool_capacity(pool);
+    std::vector<void*> blks(cap, nullptr);
+    for (uint32_t i = 0U; i < cap; i++) {
+        ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blks[i]));
+    }
+
+    void *blk = reinterpret_cast<void *>(0xDEADBEEFUL);
+    EXPECT_EQ(MEMPOOL_ERR_OUT_OF_MEMORY, mempool_alloc(pool, &blk));
+    EXPECT_EQ(nullptr, blk); /* must be cleared on OOM */
+
+    for (auto b : blks) { mempool_free(pool, b); }
+}
+
+/* -------------------------------------------------------------------- *
+ *  mempool_mgr_alloc() — *block must be NULL on every error path       *
+ * -------------------------------------------------------------------- */
+TEST(MgrAllocNullOnErrorTest, InvalidSizeClearsBlock) {
+    alignas(8) uint8_t s16[MEMPOOL_STATE_SIZE]{}, s64[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t p16[pool_buf_for(16, 4)]{};
+    alignas(8) uint8_t p64[pool_buf_for(64, 4)]{};
+    mempool_t *pool16 = nullptr, *pool64 = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(s16, sizeof s16, p16, sizeof p16, 16U, 8U, &pool16));
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(s64, sizeof s64, p64, sizeof p64, 64U, 8U, &pool64));
+
+    mempool_mgr_t mgr{};
+    mempool_t *pools[] = {pool16, pool64};
+    ASSERT_EQ(MEMPOOL_OK, mempool_mgr_init(&mgr, pools, 2U));
+
+    /* Request a size larger than the biggest pool */
+    void *blk = reinterpret_cast<void *>(0xCAFECAFEUL);
+    EXPECT_EQ(MEMPOOL_ERR_INVALID_SIZE, mempool_mgr_alloc(&mgr, 128U, &blk, nullptr));
+    EXPECT_EQ(nullptr, blk);
+}
+
+TEST(MgrAllocNullOnErrorTest, OomClearsBlock) {
+    alignas(8) uint8_t s[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t p[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(s, sizeof s, p, sizeof p, 32U, 8U, &pool));
+
+    mempool_mgr_t mgr{};
+    mempool_t *pools[] = {pool};
+    ASSERT_EQ(MEMPOOL_OK, mempool_mgr_init(&mgr, pools, 1U));
+
+    uint32_t cap = mempool_capacity(pool);
+    std::vector<void*> blks(cap, nullptr);
+    for (uint32_t i = 0U; i < cap; i++) {
+        ASSERT_EQ(MEMPOOL_OK, mempool_mgr_alloc(&mgr, 32U, &blks[i], nullptr));
+    }
+
+    void *blk = reinterpret_cast<void *>(0xCAFECAFEUL);
+    EXPECT_EQ(MEMPOOL_ERR_OUT_OF_MEMORY, mempool_mgr_alloc(&mgr, 32U, &blk, nullptr));
+    EXPECT_EQ(nullptr, blk);
+
+    for (auto b : blks) { mempool_free(pool, b); }
 }
 
 } /* anonymous namespace */
