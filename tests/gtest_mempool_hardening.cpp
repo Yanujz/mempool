@@ -1210,4 +1210,195 @@ TEST(MgrAllocNullOnErrorTest, OomClearsBlock) {
     for (auto b : blks) { mempool_free(pool, b); }
 }
 
+/* ====================================================================
+ * Audit pass 5 — new API: pool_buffer_size, walk, is_block_allocated,
+ *                          ISR drain guard failure used_blocks fix
+ * ==================================================================== */
+
+/* -------------------------------------------------------------------- *
+ *  mempool_pool_buffer_size() — runtime sizing helper                   *
+ * -------------------------------------------------------------------- */
+TEST(PoolBufferSizeTest, ReturnsNonZeroForValidInputs) {
+    /* With all features ON the result must be >= n * stride */
+    size_t sz = mempool_pool_buffer_size(32U, 8U, 8U);
+    EXPECT_GT(sz, 0U);
+    EXPECT_GE(sz, 8U * 32U); /* at minimum n * user_block_size */
+}
+
+TEST(PoolBufferSizeTest, ReturnsZeroForBadInputs) {
+    EXPECT_EQ(0U, mempool_pool_buffer_size(0U,  8U, 8U)); /* block_size=0 */
+    EXPECT_EQ(0U, mempool_pool_buffer_size(32U, 0U, 8U)); /* n=0 */
+    EXPECT_EQ(0U, mempool_pool_buffer_size(32U, 8U, 3U)); /* alignment not power-of-two */
+}
+
+TEST(PoolBufferSizeTest, BufferSufficesForActualInit) {
+    /* Allocate a buffer exactly sized by the runtime helper and verify
+     * that mempool_init succeeds inside it. */
+    const size_t BLK = 32U;
+    const uint32_t N = 4U;
+    size_t sz = mempool_pool_buffer_size(BLK, N, 8U);
+    ASSERT_GT(sz, 0U);
+
+    std::vector<uint8_t> pbuf(sz + 8U, 0U); /* +8 for alignment headroom */
+    void *raw = pbuf.data();
+    size_t space = pbuf.size();
+    std::align(8U, sz, raw, space);
+    ASSERT_NE(nullptr, raw);
+
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    mempool_t *pool = nullptr;
+    mempool_error_t err = mempool_init(state, sizeof state, raw, sz,
+                                       BLK, 8U, &pool);
+    EXPECT_EQ(MEMPOOL_OK, err);
+    if (err == MEMPOOL_OK) {
+        EXPECT_GE(mempool_capacity(pool), 1U); /* at least one block */
+    }
+}
+
+/* -------------------------------------------------------------------- *
+ *  MEMPOOL_POOL_BUFFER_SIZE macro — compile-time upper-bound           *
+ * -------------------------------------------------------------------- */
+TEST(PoolBufferSizeMacroTest, MacroUpperBoundCoversRuntime) {
+    constexpr size_t BLK  = 32U;
+    constexpr size_t N    = 8U;
+    constexpr size_t ALGN = 8U;
+    constexpr size_t macro_sz = MEMPOOL_POOL_BUFFER_SIZE(BLK, N, ALGN);
+    size_t runtime_sz = mempool_pool_buffer_size(BLK, static_cast<uint32_t>(N), ALGN);
+    EXPECT_GE(macro_sz, runtime_sz);
+}
+
+/* -------------------------------------------------------------------- *
+ *  mempool_walk() — iterate allocated blocks                            *
+ * -------------------------------------------------------------------- */
+namespace {
+
+struct WalkCtx {
+    std::vector<const void *> blocks;
+    std::vector<uint32_t>     indices;
+};
+
+static void walk_collector(const mempool_t * /*pool*/, const void *blk,
+                            uint32_t idx, void *ctx)
+{
+    auto *wctx = static_cast<WalkCtx *>(ctx);
+    wctx->blocks.push_back(blk);
+    wctx->indices.push_back(idx);
+}
+
+} // unnamed namespace
+
+TEST(WalkTest, WalkFindsAllAllocatedBlocks) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    uint32_t cap = mempool_capacity(pool);
+    std::vector<void*> blks(cap / 2U);
+    for (auto &b : blks) {
+        ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &b));
+    }
+
+    WalkCtx ctx;
+    EXPECT_EQ(MEMPOOL_OK, mempool_walk(pool, walk_collector, &ctx));
+    EXPECT_EQ(blks.size(), ctx.blocks.size());
+
+    /* Every collected pointer must be in the allocated set */
+    for (auto *b : ctx.blocks) {
+        bool found = false;
+        for (auto *a : blks) { if (a == b) { found = true; break; } }
+        EXPECT_TRUE(found) << "walk returned unexpected block " << b;
+    }
+
+    for (auto b : blks) { mempool_free(pool, b); }
+}
+
+TEST(WalkTest, WalkOnEmptyPoolCallsCallbackZeroTimes) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    WalkCtx ctx;
+    EXPECT_EQ(MEMPOOL_OK, mempool_walk(pool, walk_collector, &ctx));
+    EXPECT_EQ(0U, ctx.blocks.size());
+}
+
+TEST(WalkTest, NullArgsCovered) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 2)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_walk(pool, nullptr, nullptr));
+    EXPECT_EQ(MEMPOOL_ERR_NULL_PTR, mempool_walk(nullptr, walk_collector, nullptr));
+}
+
+/* -------------------------------------------------------------------- *
+ *  mempool_is_block_allocated() — per-block allocation query           *
+ * -------------------------------------------------------------------- */
+TEST(IsBlockAllocatedTest, AllocatedBlockReturnsOne) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+    EXPECT_EQ(1, mempool_is_block_allocated(pool, blk));
+
+    mempool_free(pool, blk);
+    EXPECT_EQ(0, mempool_is_block_allocated(pool, blk)); /* now free */
+}
+
+TEST(IsBlockAllocatedTest, InvalidPtrReturnsZero) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    uint8_t outside = 0U;
+    EXPECT_EQ(0, mempool_is_block_allocated(nullptr, &outside));
+    EXPECT_EQ(0, mempool_is_block_allocated(pool, nullptr));
+    EXPECT_EQ(0, mempool_is_block_allocated(pool, &outside)); /* out-of-range */
+}
+
+/* -------------------------------------------------------------------- *
+ *  ISR drain guard failure: used_blocks must be decremented            *
+ *  (fix in mp_flush_isr_queue matching the mempool_free() fix)        *
+ * -------------------------------------------------------------------- */
+TEST(IsrGuardFailureStatsTest, UsedBlocksDecrementedOnIsrGuardFailure) {
+    alignas(8) uint8_t state[MEMPOOL_STATE_SIZE]{};
+    alignas(8) uint8_t pbuf[pool_buf_for(32, 4)]{};
+    mempool_t *pool = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_init(state, sizeof state,
+                                       pbuf, sizeof pbuf, 32U, 8U, &pool));
+
+    void *blk = nullptr;
+    ASSERT_EQ(MEMPOOL_OK, mempool_alloc(pool, &blk));
+
+    /* Corrupt the canary */
+    static constexpr size_t USER_SZ = 32U;
+    *reinterpret_cast<uint32_t *>(
+            static_cast<uint8_t *>(blk) + USER_SZ) ^= 0xFFFFFFFFU;
+
+    /* Queue via ISR and drain */
+    ASSERT_EQ(MEMPOOL_OK, mempool_free_from_isr(pool, blk));
+    mempool_drain_isr_queue(pool);
+
+    mempool_stats_t s{};
+    ASSERT_EQ(MEMPOOL_OK, mempool_get_stats(pool, &s));
+    /* Guard failure during drain: used_blocks decremented (block quarantined),
+     * free_blocks unchanged (block not returned to pool). */
+    EXPECT_EQ(0U, s.used_blocks);
+    EXPECT_EQ(1U, s.guard_violations);
+    /* free_blocks must NOT increase — quarantined block never reached free list */
+    EXPECT_EQ(mempool_capacity(pool) - 1U, s.free_blocks);
+}
+
 } /* anonymous namespace */

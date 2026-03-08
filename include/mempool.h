@@ -68,11 +68,41 @@ typedef void (*mempool_oom_hook_t)(mempool_t *pool, void *user_data);
 #endif
 
 
-/* -------------------------------------------------------------------------
- * Core API
- * ---------------------------------------------------------------------- */
+/**
+ * Return the number of bytes a pool buffer must be to hold @p n blocks of
+ * @p block_size bytes aligned to @p alignment, accounting for all currently
+ * active feature overheads (guard canary, bitmap, tags).
+ *
+ * This is a runtime companion to MEMPOOL_POOL_BUFFER_SIZE().  It respects
+ * the compile-time feature flags and returns the exact minimum size.
+ * Returns 0 on invalid arguments (block_size==0, n==0, alignment not a
+ * power of two).
+ */
+size_t mempool_pool_buffer_size(size_t block_size, uint32_t n, size_t alignment);
 
-/** Return the number of bytes needed for the state buffer. */
+/* -------------------------------------------------------------------------
+ * Compile-time pool buffer sizing (conservative upper bound)
+ *
+ * MEMPOOL_POOL_BUFFER_SIZE(block_size, n, alignment)
+ *   Expands to a constant expression for the maximum pool buffer size
+ *   assuming ALL optional features (guard, bitmap, tags) are active.
+ *   Safe to use as a static array size.  alignment must be a power of two.
+ *   Example:
+ *     static uint8_t pool_buf[MEMPOOL_POOL_BUFFER_SIZE(64, 32, 8)];
+ * ---------------------------------------------------------------------- */
+#define MEMPOOL_POOL_BUFFER_SIZE(block_size_, n_, alignment_)  \
+    (  /* bitmap: ceil(n/8) rounded up to alignment */          \
+       ((((size_t)(n_) + 7U) / 8U + (size_t)(alignment_) - 1U) \
+            & ~((size_t)(alignment_) - 1U))                     \
+       /* tags: n * 4 bytes rounded up */                       \
+     + ((((size_t)(n_) * 4U) + (size_t)(alignment_) - 1U)      \
+            & ~((size_t)(alignment_) - 1U))                     \
+       /* blocks: n * stride where stride includes 4-byte guard */ \
+     + (size_t)(n_) * (((size_t)(block_size_) + 4U               \
+            + (size_t)(alignment_) - 1U) & ~((size_t)(alignment_) - 1U)) \
+    )
+
+
 size_t mempool_state_size(void);
 
 /**
@@ -146,6 +176,46 @@ uint32_t mempool_block_size(const mempool_t *pool);
  * @return Block count, or 0 on invalid arguments.
  */
 uint32_t mempool_capacity(const mempool_t *pool);
+
+/* -------------------------------------------------------------------------
+ * Diagnostic block iteration
+ * ---------------------------------------------------------------------- */
+#if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
+/**
+ * Callback type for mempool_walk().
+ * @param pool   The pool being walked.
+ * @param block  Pointer to the currently-allocated block.
+ * @param idx    0-based block index within the pool.
+ * @param ctx    Opaque pointer passed through from mempool_walk().
+ */
+typedef void (*mempool_walk_fn_t)(const mempool_t *pool,
+                                  const void       *block,
+                                  uint32_t          idx,
+                                  void             *ctx);
+
+/**
+ * Iterate over every currently-allocated block and invoke @p fn for each.
+ *
+ * The task-level lock is held for the duration of the walk; @p fn must not
+ * call back into this pool.  Requires MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+ * (the bitmap is used to identify which blocks are allocated).
+ *
+ * @param pool  Pool to walk.
+ * @param fn    Callback invoked for each allocated block.
+ * @param ctx   Opaque context pointer passed to @p fn unchanged.
+ * @return MEMPOOL_OK, MEMPOOL_ERR_NULL_PTR, or MEMPOOL_ERR_NOT_INITIALIZED.
+ */
+mempool_error_t mempool_walk(const mempool_t   *pool,
+                              mempool_walk_fn_t  fn,
+                              void              *ctx);
+
+/**
+ * Return 1 if @p block is currently allocated, 0 if it is free or if
+ * @p block does not address a valid block in @p pool.
+ * Requires MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1.
+ */
+int mempool_is_block_allocated(const mempool_t *pool, const void *block);
+#endif /* MEMPOOL_ENABLE_DOUBLE_FREE_CHECK */
 
 /* -------------------------------------------------------------------------
  * Statistics
