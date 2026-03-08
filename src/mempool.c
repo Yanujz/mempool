@@ -182,14 +182,18 @@ static void mp_flush_isr_queue(mempool_t *pool)
 #endif /* MEMPOOL_ENABLE_GUARD */
 
 #if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
-        /* Clear the allocation bit only for valid (non-guard-violated) blocks.
-         * A subsequent mempool_free() on this block will then see the bit
-         * cleared and correctly return MEMPOOL_ERR_DOUBLE_FREE. */
+        /* Check the bitmap BEFORE clearing the bit.  If the bit is already 0
+         * the same block was queued twice via mempool_free_from_isr() (ISR
+         * double-free).  Discard the duplicate entry silently — the block is
+         * already in the free list from the first drain. */
         {
             uint32_t idx = mp_block_idx(pool, blk);
             uint32_t bi  = idx >> 3U;
             uint8_t  m   = (uint8_t)(1U << (idx & 7U));
             if (bi < pool->bitmap_bytes) {
+                if ((pool->bitmap[bi] & m) == 0U) {
+                    continue; /* duplicate ISR free — discard */
+                }
                 pool->bitmap[bi] = (uint8_t)(pool->bitmap[bi] & (uint8_t)(~m));
             }
         }
@@ -350,7 +354,12 @@ mempool_error_t mempool_alloc(mempool_t *pool, void **block)
 {
     free_node_t *nd;
 
-    if ((pool == NULL) || (block == NULL)) {
+    if (block == NULL) {
+        return MEMPOOL_ERR_NULL_PTR;
+    }
+    *block = NULL; /* always clear so callers never see a stale pointer */
+
+    if (pool == NULL) {
         return MEMPOOL_ERR_NULL_PTR;
     }
     if (pool->magic != MEMPOOL_MAGIC) {
@@ -471,6 +480,27 @@ mempool_error_t mempool_free(mempool_t *pool, void *block)
 
     MEMPOOL_LOCK();
 
+#if MEMPOOL_ENABLE_GUARD
+    /* Validate post-canary FIRST, before any state is modified.
+     * If the canary is bad the block is quarantined (not returned to the
+     * free list).  The bitmap bit is left SET so any subsequent call to
+     * mempool_free() on the same block correctly returns DOUBLE_FREE rather
+     * than silently adding it a second time.  used_blocks is decremented
+     * because from the caller's perspective the allocation is over. */
+    {
+        const uint32_t *canary = (const uint32_t *)(const void *)
+                                 ((const uint8_t *)block + pool->user_block_size);
+        if (*canary != (uint32_t)MEMPOOL_CANARY_VALUE) {
+#if MEMPOOL_ENABLE_STATS
+            pool->stats.guard_violations++;
+            if (pool->stats.used_blocks > 0U) { pool->stats.used_blocks--; }
+#endif
+            MEMPOOL_UNLOCK();
+            return MEMPOOL_ERR_GUARD_CORRUPTED;
+        }
+    }
+#endif
+
 #if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
     {
         uint32_t idx = mp_block_idx(pool, block);
@@ -486,21 +516,6 @@ mempool_error_t mempool_free(mempool_t *pool, void *block)
             return MEMPOOL_ERR_DOUBLE_FREE;
         }
         pool->bitmap[bi] = (uint8_t)(pool->bitmap[bi] & (uint8_t)(~m));
-    }
-#endif
-
-#if MEMPOOL_ENABLE_GUARD
-    /* Validate post-canary before anything else touches the block */
-    {
-        const uint32_t *canary = (const uint32_t *)(const void *)
-                                 ((const uint8_t *)block + pool->user_block_size);
-        if (*canary != (uint32_t)MEMPOOL_CANARY_VALUE) {
-#if MEMPOOL_ENABLE_STATS
-            pool->stats.guard_violations++;
-#endif
-            MEMPOOL_UNLOCK();
-            return MEMPOOL_ERR_GUARD_CORRUPTED;
-        }
     }
 #endif
 

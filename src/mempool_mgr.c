@@ -54,6 +54,7 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
     if ((mgr == NULL) || (block == NULL)) {
         return MEMPOOL_ERR_NULL_PTR;
     }
+    *block = NULL; /* always clear so callers never see a stale pointer */
 
     for (i = 0U; i < mgr->count; i++) {
         mempool_error_t err;
