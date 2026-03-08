@@ -46,11 +46,13 @@ void mp_flush_isr_queue(mempool_t *pool)
          * A corrupted canary means a buffer overrun reached the ISR-free path.
          * Quarantine the block: leave bitmap bit SET (normal free() will then
          * return DOUBLE_FREE instead of silently corrupting the free list).
-         * Decrement used_blocks so stats remain accurate. */
+         * Decrement used_blocks so stats remain accurate.
+         * Use memcpy for the 4-byte read to avoid a misaligned uint32_t load
+         * when user_block_size % 4 != 0. */
         {
-            const uint32_t *canary = (const uint32_t *)(const void *)
-                                     ((const uint8_t *)blk + pool->user_block_size);
-            if (*canary != (uint32_t)MEMPOOL_CANARY_VALUE) {
+            uint32_t cv = 0U;
+            memcpy(&cv, (const uint8_t *)blk + pool->user_block_size, sizeof(cv));
+            if (cv != (uint32_t)MEMPOOL_CANARY_VALUE) {
 #if MEMPOOL_ENABLE_STATS
                 pool->stats.guard_violations++;
                 if (pool->stats.used_blocks > 0U) { pool->stats.used_blocks--; }

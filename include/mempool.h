@@ -13,8 +13,8 @@ extern "C" {
 /* Version info */
 #define MEMPOOL_VERSION_MAJOR 0
 #define MEMPOOL_VERSION_MINOR 5
-#define MEMPOOL_VERSION_PATCH 1
-#define MEMPOOL_VERSION_STRING "0.5.1"
+#define MEMPOOL_VERSION_PATCH 2
+#define MEMPOOL_VERSION_STRING "0.5.2"
 
 /* -------------------------------------------------------------------------
  * Opaque pool handle (declared early so it can be used in callback types)
@@ -213,6 +213,24 @@ int mempool_is_initialized(const mempool_t *pool);
  * @return Block stride, or 0 on invalid arguments.
  */
 uint32_t mempool_block_size(const mempool_t *pool);
+
+/**
+ * Return the usable (caller-visible) bytes per block.
+ *
+ * This is the @p block_size value passed to mempool_init() — the number of
+ * bytes the application can actually write into each allocated block.  It is
+ * strictly less than mempool_block_size() when MEMPOOL_ENABLE_GUARD is ON
+ * (the stride includes the 4-byte guard canary).
+ *
+ * Use this value when routing requests through mempool_mgr_alloc() so that
+ * you compare the requested size against the *usable* capacity of each pool
+ * rather than the physical stride.
+ *
+ * Complexity: **O(1)**.  Always available regardless of MEMPOOL_ENABLE_STATS.
+ *
+ * @return Usable block size in bytes, or 0 on invalid arguments.
+ */
+uint32_t mempool_user_block_size(const mempool_t *pool);
 
 /**
  * Return the total number of blocks (pool capacity) established at init time.

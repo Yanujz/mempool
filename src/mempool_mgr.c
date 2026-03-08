@@ -1,16 +1,16 @@
 #include "mempool_mgr.h"
 #include <stddef.h>
 
-/* Simple insertion-sort by ascending block_size (pool count is tiny). */
+/* Simple insertion-sort by ascending user_block_size (pool count is tiny). */
 static void mgr_sort(mempool_t **arr, uint32_t n)
 {
     uint32_t i;
     for (i = 1U; i < n; i++) {
         mempool_t *key    = arr[i];
-        uint32_t   key_bs = mempool_block_size(key);
+        uint32_t   key_bs = mempool_user_block_size(key);
         uint32_t   j      = i;
         while (j > 0U) {
-            if (mempool_block_size(arr[j - 1U]) <= key_bs) { break; }
+            if (mempool_user_block_size(arr[j - 1U]) <= key_bs) { break; }
             arr[j] = arr[j - 1U];
             j--;
         }
@@ -63,7 +63,7 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
     for (i = 0U; i < mgr->count; i++) {
         mempool_error_t err;
 
-        if ((size_t)mempool_block_size(mgr->pools[i]) < min_size) { continue; }
+        if ((size_t)mempool_user_block_size(mgr->pools[i]) < min_size) { continue; }
 
         found_candidate = 1U;
         err = mempool_alloc(mgr->pools[i], block);
