@@ -171,16 +171,13 @@ mempool_error_t mempool_init(
     }
 
     /* Fill in pool state */
-    p->magic        = MEMPOOL_MAGIC;
-    p->block_size   = (uint32_t)stride;
-    p->total_blocks = n;
-    p->blocks_start = (void *)((uint8_t *)pool_buffer + blk_off);
-    p->blocks_end   = (void *)((uint8_t *)p->blocks_start + (size_t)n * stride);
-    p->block_shift  = mp_is_pow2(stride) ? mp_log2((uint32_t)stride) : 0U;
-
-#if MEMPOOL_ENABLE_GUARD
-    p->user_block_size = (uint32_t)block_size;
-#endif
+    p->magic           = MEMPOOL_MAGIC;
+    p->block_size      = (uint32_t)stride;
+    p->user_block_size = (uint32_t)block_size; /* usable bytes: stride - 4 when GUARD ON */
+    p->total_blocks    = n;
+    p->blocks_start    = (void *)((uint8_t *)pool_buffer + blk_off);
+    p->blocks_end      = (void *)((uint8_t *)p->blocks_start + (size_t)n * stride);
+    p->block_shift     = mp_is_pow2(stride) ? mp_log2((uint32_t)stride) : 0U;
 
 #if MEMPOOL_ENABLE_OOM_HOOK
     p->oom_hook      = NULL;
@@ -252,9 +249,12 @@ mempool_error_t mempool_alloc(mempool_t *pool, void **block)
 
 #if MEMPOOL_ENABLE_GUARD
     {
-        uint32_t *canary = (uint32_t *)(void *)
-                           ((uint8_t *)nd + pool->user_block_size);
-        *canary = (uint32_t)MEMPOOL_CANARY_VALUE;
+        /* Use memcpy for the 4-byte canary write to avoid a potential
+         * misaligned uint32_t store when user_block_size % 4 != 0.
+         * memcpy is well-defined for any alignment and compiles to a
+         * single store instruction on any reasonable target. */
+        const uint32_t cv = (uint32_t)MEMPOOL_CANARY_VALUE;
+        memcpy((uint8_t *)nd + pool->user_block_size, &cv, sizeof(cv));
     }
 #endif
 
@@ -306,9 +306,11 @@ mempool_error_t mempool_free(mempool_t *pool, void *block)
      */
 #if MEMPOOL_ENABLE_GUARD
     {
-        const uint32_t *canary = (const uint32_t *)(const void *)
-                                 ((const uint8_t *)block + pool->user_block_size);
-        if (*canary != (uint32_t)MEMPOOL_CANARY_VALUE) {
+        /* Use memcpy for canary read to avoid misaligned uint32_t load
+         * when user_block_size % 4 != 0.  Safe on any alignment. */
+        uint32_t cv = 0U;
+        memcpy(&cv, (const uint8_t *)block + pool->user_block_size, sizeof(cv));
+        if (cv != (uint32_t)MEMPOOL_CANARY_VALUE) {
 #if MEMPOOL_ENABLE_STATS
             pool->stats.guard_violations++;
             if (pool->stats.used_blocks > 0U) { pool->stats.used_blocks--; }
@@ -433,6 +435,12 @@ uint32_t mempool_block_size(const mempool_t *pool)
 {
     if ((pool == NULL) || (pool->magic != MEMPOOL_MAGIC)) { return 0U; }
     return pool->block_size;
+}
+
+uint32_t mempool_user_block_size(const mempool_t *pool)
+{
+    if ((pool == NULL) || (pool->magic != MEMPOOL_MAGIC)) { return 0U; }
+    return pool->user_block_size;
 }
 
 uint32_t mempool_capacity(const mempool_t *pool)

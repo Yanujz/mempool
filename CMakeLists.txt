@@ -236,6 +236,64 @@ target_link_libraries(mempool_gtest_mgr_nostats
 
 gtest_discover_tests(mempool_gtest_mgr_nostats)
 
+# -----------------------------------------------------------------------
+# Stress test suite — 1000+ parameterised cases, all features ON
+# -----------------------------------------------------------------------
+add_executable(mempool_gtest_stress
+    ${MEMPOOL_CORE_SRCS}
+    src/mempool_mgr.c
+    tests/gtest_mempool_stress.cpp
+)
+target_include_directories(mempool_gtest_stress PRIVATE include tests)
+target_compile_definitions(mempool_gtest_stress PRIVATE
+    MEMPOOL_ENABLE_STATS=1
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_stress PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_stress PRIVATE GTest::gtest_main)
+gtest_discover_tests(mempool_gtest_stress)
+
+# -----------------------------------------------------------------------
+# Paranoia test suite — deep invariant/security checks, all features ON
+# -----------------------------------------------------------------------
+add_executable(mempool_gtest_paranoia
+    ${MEMPOOL_CORE_SRCS}
+    src/mempool_mgr.c
+    tests/gtest_mempool_paranoia.cpp
+)
+target_include_directories(mempool_gtest_paranoia PRIVATE include tests)
+target_compile_definitions(mempool_gtest_paranoia PRIVATE
+    MEMPOOL_ENABLE_STATS=1
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_paranoia PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_paranoia PRIVATE GTest::gtest_main)
+gtest_discover_tests(mempool_gtest_paranoia)
+
 add_test(NAME mempool_ctest COMMAND mempool_ctest)
 
 # Installation

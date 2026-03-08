@@ -2,7 +2,7 @@
 
 **Library:** `mempool` — deterministic O(1) memory pool for embedded and safety-critical systems  
 **Branch:** `feature/v2-optimized`  
-**Current version:** 0.5.1  
+**Current version:** 0.5.2  
 
 ---
 
@@ -16,7 +16,161 @@
 | 4 | Free-path ordering audit | 4 bugs (mempool_free bitmap cleared before guard check, ISR double-free undetected, alloc/mgr_alloc stale `*block` on error) | 4 fixes; 10 new tests; 611 tests |
 | 5 | Code quality + ISR drain guard stats | 1 bug (ISR drain guard failure did not decrement `used_blocks`); refactored monolithic `mempool.c` into 3 focused translation units; added `mempool_pool_buffer_size()`, `mempool_walk()`, `mempool_is_block_allocated()` | 1 fix; split; new APIs; 611 tests |
 | 6 | Cross-unit deduplication, type-safety, tag lifetime, error propagation, documentation | 5 bugs (see Pass 6 section); Doxyfile; README overhaul with porting guide + O(1) proofs | 5 fixes; 2 new tests; 613 tests |
-| 7 (this pass) | Tag lifetime, mgr state corruption, `mp_log2` performance, API completeness, examples | 4 bugs (see Pass 7 section); `mempool_has_free_block()`; `__builtin_ctz`; example fixes | 4 fixes; 5 new tests; 617 tests |
+| 7 | Tag lifetime, mgr state corruption, `mp_log2` performance, API completeness, examples | 4 bugs (see Pass 7 section); `mempool_has_free_block()`; `__builtin_ctz`; example fixes | 4 fixes; 5 new tests; 617 tests |
+| 8 (this pass) | Canary alignment, mgr routing correctness, 2000+ stress tests | 3 bugs (see Pass 8 section); `mempool_user_block_size()` added; 2 new test suites | 3 fixes; +1667 tests; **2284 tests** |
+
+---
+
+## Pass 8 Bug Findings
+
+### Bug 8.1 — Misaligned canary read/write when `block_size % 4 != 0`
+**File:** `src/mempool_core.c`, `src/mempool_isr.c`  
+**Severity:** High (C undefined behaviour; hardware fault on strict-alignment targets)
+
+When `MEMPOOL_ENABLE_GUARD=1`, the 4-byte canary is written and read at address
+`block_start + user_block_size`.  The original code performed this via a
+`uint32_t *` pointer cast:
+
+```c
+uint32_t *canary = (uint32_t *)(void *)(block_start + user_block_size);
+*canary = MEMPOOL_CANARY_VALUE;   /* write */
+…
+uint32_t cv = *canary;            /* read  */
+```
+
+When `user_block_size % 4 != 0` (e.g. block sizes 9, 10, 11, 18, 21…), the
+canary address is not 4-byte aligned.  On ARM Cortex-M0/M0+ (and any target
+with `UNALIGN_TRP` set), this raises a Hard Fault.  On x86 it is silent but
+still undefined behaviour in C, making the code non-portable and flagged by
+strict MISRA analysis.
+
+All previous test configurations happened to use block sizes divisible by 4
+(8, 12, 16, 20, 32, 48, 64, 128, 256), so this path was never exercised.
+
+**Fix:** All 3 canary sites (2 in `mempool_core.c`, 1 in `mempool_isr.c`) now
+use `memcpy` for the 4-byte read and write:
+
+```c
+uint32_t cv = MEMPOOL_CANARY_VALUE;
+memcpy((uint8_t *)block_start + user_block_size, &cv, sizeof(cv));   /* write */
+…
+uint32_t cv;
+memcpy(&cv, (const uint8_t *)block_start + user_block_size, sizeof(cv));  /* read */
+```
+
+`memcpy` is defined for any byte alignment; optimising compilers emit the same
+single-register instruction as the pointer dereference when the alignment is
+already 4, making this a zero-cost fix on modern toolchains.
+
+---
+
+### Bug 8.2 — `mempool_mgr_alloc` compared stride against `min_size`, not usable bytes
+**File:** `src/mempool_mgr.c`  
+**Severity:** High (silent buffer overflow — request could be routed to a pool
+smaller than the requested size)
+
+`mempool_mgr_alloc(mgr, min_size, …)` promises to return a block with at least
+`min_size` usable bytes.  The routing loop used `mempool_block_size()` (which
+returns the physical stride, including the 4-byte guard canary and alignment
+padding) to gate pool selection:
+
+```c
+if ((size_t)mempool_block_size(mgr->pools[i]) < min_size) { continue; }
+```
+
+With `MEMPOOL_ENABLE_GUARD=1`, a 32-byte-user-size pool has a stride of
+`align_up(32 + 4, 8) = 40`.  A request for `min_size = 33` would pass the
+check (`40 >= 33`) and allocate from the 32-byte pool — providing only 32
+usable bytes for a caller that requested 33, a classic buffer overflow.
+
+The same stride-vs-user-size confusion affected `mgr_sort`, which sorted pools
+by stride rather than by usable capacity, causing incorrect pool ordering when
+guard padding moved a smaller pool's stride above a larger pool's user size.
+
+**Fix:**
+1. Added `uint32_t mempool_user_block_size(const mempool_t *pool)` to the
+   public API — always available, returns the `block_size` argument from
+   `mempool_init` (the caller-visible usable bytes).
+2. Moved `user_block_size` out of the `#if MEMPOOL_ENABLE_GUARD` struct guard so
+   it is always present in `struct mempool` regardless of feature flags.
+3. `mgr_sort` now sorts by `mempool_user_block_size`.
+4. The routing skip condition now reads:
+   ```c
+   if ((size_t)mempool_user_block_size(mgr->pools[i]) < min_size) { continue; }
+   ```
+
+---
+
+### Bug 8.3 — `mempool_alloc` drains the ISR queue before allocating (test-level finding)
+**File:** `src/mempool_core.c`  
+**Severity:** Informational (correct behaviour, but latent documentation gap)
+
+`mempool_alloc` unconditionally calls `mp_flush_isr_queue` when `isr_count > 0`,
+before checking the free list.  This is correct (it recycles deferred frees to
+satisfy the allocation), but it means that a test trying to verify ISR queue
+overflow by alternating `mempool_free_from_isr` and `mempool_alloc` will
+inadvertently drain the queue between the fill and the overflow check, making
+the overflow unreachable.
+
+This was not a code bug; it was a test design error caused by a missing
+documentation note.  The fix was to restructure the `IsrQueue.FillToExactCapacity`
+test to pre-allocate all required blocks (including the overflow probe) before
+filling the ISR queue, avoiding any `mempool_alloc` call between fill and test.
+
+**Documentation fix:** Added a comment in `mempool_core.c` at the ISR drain
+site and updated this audit.
+
+---
+
+## Pass 8 Improvements
+
+### Improvement 8.A — `mempool_user_block_size()` public API
+**File:** `include/mempool.h`, `src/mempool_core.c`
+
+New O(1) accessor that returns the number of usable bytes per block (the
+`block_size` argument passed to `mempool_init`).  This is strictly less than
+`mempool_block_size()` (stride) when `MEMPOOL_ENABLE_GUARD=1` (stride = user
+size + 4 + alignment padding).  Always available regardless of feature flags.
+
+Key use case: correctly sizing `min_size` arguments to `mempool_mgr_alloc`
+without needing to subtract guard overhead manually.
+
+---
+
+### Improvement 8.B — 1667 new tests in two new test suites
+**Files:** `tests/gtest_mempool_stress.cpp`, `tests/gtest_mempool_paranoia.cpp`
+
+**`mempool_gtest_stress`** (1130 tests, 17 skipped due to small pool configs):  
+- 113 pool configurations: block sizes 8–256 (including 9, 10, 11, 18, 21 with
+  `% 4 != 0` to exercise the canary `memcpy` fix), 2–32 blocks, alignments 4
+  and 8.
+- 10 stress patterns per config: LIFO alloc-free, FIFO alloc-then-free, random
+  free order, interleaved alloc-free, 5-cycle fill-drain, half-alloc-free,
+  reset restores full capacity, stats consistency after every operation,
+  alloc-poison pattern, `mempool_has_free_block` transitions.
+
+**`mempool_gtest_paranoia`** (544 tests):  
+30 base configs × 16 deep invariant test cases plus ~120 standalone tests covering:
+- Canary tamper at each of the 4 canary bytes (byte-granular write verification)
+- Double-free after realloc (LIFO: same block returned → first free succeeds,
+  second is detected)
+- Misaligned / out-of-range free pointer rejection
+- Walk count vs. `stats.used_blocks` at full and half capacity
+- ISR queue: fill to exact capacity, overflow detection, guard corruption in ISR
+  drain path, FIFO ordering verification
+- All 23 null-pointer guard entry points
+- `mempool_init` validation: zero block size, non-power-of-2 alignment, too-small
+  state buffer, too-small pool buffer
+- `mempool_strerror` coverage of all 10 error codes
+- Tag lifecycle: set/get on allocated block, rejection on freed block
+- Peak tracking: peak survives reset when `reset_stats=false`
+- Free-poison pattern inspection
+- Mgr routing: 24 bytes → 32-byte pool; 33 bytes → 64-byte pool (verifies Bug 8.2 fix)
+- Mgr corrupted-count guard
+- OOM hook invocation counter
+- Multi-pool isolation (cross-pool free returns `INVALID_BLOCK`)
+- `mempool_user_block_size` == `mempool_block_size` − 4 when guard ON
+- Version string non-empty
 
 ---
 
@@ -435,6 +589,8 @@ Feature overheads per pool (64-bit host, GUARD ON, ISR_QUEUE_CAPACITY=8):
 | Tag written to freed block | Bitmap check in `mempool_set_block_tag` (pass 7) | `MEMPOOL_ERR_INVALID_BLOCK` |
 | Tag read from freed block | Bitmap check in `mempool_get_block_tag` (pass 7) | `MEMPOOL_ERR_INVALID_BLOCK` |
 | Corrupted `mgr->count` field | Bounds check in `mempool_mgr_alloc/free` (pass 7) | `MEMPOOL_ERR_INVALID_SIZE` |
+| Canary misaligned write/read (`block_size % 4 != 0`) | `memcpy`-based canary I/O (pass 8) | No UB; safe on strict-alignment targets |
+| Mgr routing to pool smaller than request | `mempool_user_block_size()` comparison (pass 8) | Correct smallest-fitting-pool routing |
 
 ### What mempool does NOT protect against
 
@@ -492,8 +648,16 @@ All features default to OFF except `STATS`, `DOUBLE_FREE_CHECK`, and `STRERROR`.
 | `mempool_gtest_comprehensive` | Same as above | 515 |
 | `mempool_gtest_hardening` | All features ON | 79 |
 | `mempool_gtest_mgr_nostats` | All features ON except STATS=0 | 6 |
+| `mempool_gtest_stress` | All features ON — 113 configs × 10 suites | 1123 |
+| `mempool_gtest_paranoia` | All features ON — deep invariant + security | 544 |
 | `mempool_ctest` | C test harness | 1 |
-| **Total** | | **617** |
+| **Total** | | **2284** |
 
-All tests pass on macOS (Apple Clang, `-fsanitize=address,undefined`) and the build is warning-free at `-Wall -Wextra -Wpedantic -Wconversion`.
+Skipped tests: 17 in `mempool_gtest_stress` (single-block configs too small for
+half-alloc-free pattern).
+
+All tests pass on macOS (Apple Clang, `-Wall -Wextra -Wpedantic -Wconversion`,
+sanitizers OFF for speed).  The canary misalignment fix (Bug 8.1) is specifically
+exercised by the `ConfigsNPow` parameterisation in `gtest_mempool_stress.cpp`,
+which includes block sizes 9, 10, 11, 18, and 21 — all with `% 4 != 0`.
 

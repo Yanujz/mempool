@@ -32,11 +32,9 @@ struct mempool {
     void     *blocks_end;    /* one-past-end pointer of the block array */
 
     uint32_t  block_size;    /* per-block stride in bytes (includes guard canary when GUARD ON) */
+    uint32_t  user_block_size; /* caller-visible bytes per block (= block_size when GUARD OFF;
+                                  = block_size - 4 when GUARD ON; always set at init) */
     uint32_t  total_blocks;
-
-#if MEMPOOL_ENABLE_GUARD
-    uint32_t  user_block_size; /* caller-visible bytes per block (stride minus 4-byte canary) */
-#endif
 
 #if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
     uint8_t  *bitmap;        /* allocation bitmap; lives in pool_buffer */
