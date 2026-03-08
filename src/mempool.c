@@ -163,6 +163,20 @@ static void mp_flush_isr_queue(mempool_t *pool)
         pool->isr_count--;
         MEMPOOL_ISR_UNLOCK();
 
+#if MEMPOOL_ENABLE_DOUBLE_FREE_CHECK
+        /* Clear the allocation bit so a subsequent mempool_free() on the same
+         * block is correctly detected as a double-free rather than silently
+         * adding the block to the free list a second time. */
+        {
+            uint32_t idx = mp_block_idx(pool, blk);
+            uint32_t bi  = idx >> 3U;
+            uint8_t  m   = (uint8_t)(1U << (idx & 7U));
+            if (bi < pool->bitmap_bytes) {
+                pool->bitmap[bi] = (uint8_t)(pool->bitmap[bi] & (uint8_t)(~m));
+            }
+        }
+#endif
+
         nd       = (free_node_t *)blk;
         nd->next = (free_node_t *)pool->free_list;
         pool->free_list = (void *)nd;
@@ -551,8 +565,28 @@ mempool_error_t mempool_alloc_tagged(mempool_t *pool, void **block,
 #if MEMPOOL_ENABLE_ISR_FREE
 mempool_error_t mempool_free_from_isr(mempool_t *pool, void *block)
 {
+    uintptr_t ba, offset;
+
     if ((pool == NULL) || (block == NULL)) { return MEMPOOL_ERR_NULL_PTR; }
     if (pool->magic != MEMPOOL_MAGIC)      { return MEMPOOL_ERR_NOT_INITIALIZED; }
+
+    /* Validate block before acquiring the ISR lock — pool geometry is
+     * immutable after init so these reads are safe in ISR context. */
+    ba = (uintptr_t)block;
+    if ((ba < (uintptr_t)pool->blocks_start) ||
+        (ba >= (uintptr_t)pool->blocks_end)) {
+        return MEMPOOL_ERR_INVALID_BLOCK;
+    }
+    offset = ba - (uintptr_t)pool->blocks_start;
+    if (pool->block_shift != 0U) {
+        if ((offset & (((uintptr_t)1U << pool->block_shift) - 1U)) != 0U) {
+            return MEMPOOL_ERR_INVALID_BLOCK;
+        }
+    } else {
+        if ((offset % (uintptr_t)pool->block_size) != 0U) {
+            return MEMPOOL_ERR_INVALID_BLOCK;
+        }
+    }
 
     MEMPOOL_ISR_LOCK();
 
@@ -680,6 +714,18 @@ int mempool_contains(const mempool_t *pool, const void *ptr)
     p = (uintptr_t)ptr;
     return (p >= (uintptr_t)pool->blocks_start) &&
            (p <  (uintptr_t)pool->blocks_end);
+}
+
+uint32_t mempool_block_size(const mempool_t *pool)
+{
+    if ((pool == NULL) || (pool->magic != MEMPOOL_MAGIC)) { return 0U; }
+    return pool->block_size;
+}
+
+uint32_t mempool_capacity(const mempool_t *pool)
+{
+    if ((pool == NULL) || (pool->magic != MEMPOOL_MAGIC)) { return 0U; }
+    return pool->total_blocks;
 }
 
 #if MEMPOOL_ENABLE_STRERROR

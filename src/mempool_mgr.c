@@ -6,23 +6,11 @@ static void mgr_sort(mempool_t **arr, uint32_t n)
 {
     uint32_t i;
     for (i = 1U; i < n; i++) {
-        mempool_t *key = arr[i];
-        mempool_stats_t ks;
-        uint32_t        j;
-        uint32_t key_bs = 0U;
-
-        if (mempool_get_stats(key, &ks) == MEMPOOL_OK) {
-            key_bs = ks.block_size;
-        }
-
-        j = i;
+        mempool_t *key    = arr[i];
+        uint32_t   key_bs = mempool_block_size(key);
+        uint32_t   j      = i;
         while (j > 0U) {
-            mempool_stats_t js;
-            uint32_t jbs = 0U;
-            if (mempool_get_stats(arr[j - 1U], &js) == MEMPOOL_OK) {
-                jbs = js.block_size;
-            }
-            if (jbs <= key_bs) { break; }
+            if (mempool_block_size(arr[j - 1U]) <= key_bs) { break; }
             arr[j] = arr[j - 1U];
             j--;
         }
@@ -65,11 +53,9 @@ mempool_error_t mempool_mgr_alloc(mempool_mgr_t *mgr,
     }
 
     for (i = 0U; i < mgr->count; i++) {
-        mempool_stats_t st;
         mempool_error_t err;
 
-        if (mempool_get_stats(mgr->pools[i], &st) != MEMPOOL_OK) { continue; }
-        if ((size_t)st.block_size < min_size) { continue; }
+        if ((size_t)mempool_block_size(mgr->pools[i]) < min_size) { continue; }
 
         found_candidate = 1;
         err = mempool_alloc(mgr->pools[i], block);

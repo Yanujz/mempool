@@ -197,6 +197,38 @@ target_link_libraries(mempool_gtest_hardening
 
 gtest_discover_tests(mempool_gtest_hardening)
 
+# No-STATS mgr regression build — verifies that mempool_mgr compiles and
+# operates correctly when MEMPOOL_ENABLE_STATS=0 (previously a compile error).
+add_executable(mempool_gtest_mgr_nostats
+    src/mempool.c
+    src/mempool_mgr.c
+    tests/gtest_mempool_mgr_nostats.cpp
+)
+target_include_directories(mempool_gtest_mgr_nostats PRIVATE include tests)
+target_compile_definitions(mempool_gtest_mgr_nostats PRIVATE
+    MEMPOOL_ENABLE_STATS=0
+    MEMPOOL_ENABLE_DOUBLE_FREE_CHECK=1
+    MEMPOOL_ENABLE_STRERROR=1
+    MEMPOOL_ENABLE_GUARD=1
+    MEMPOOL_ENABLE_POISON=1
+    MEMPOOL_ENABLE_OOM_HOOK=1
+    MEMPOOL_ENABLE_ISR_FREE=1
+    MEMPOOL_ENABLE_TAGS=1
+)
+target_compile_options(mempool_gtest_mgr_nostats PRIVATE
+    -include mempool_test_sync.h
+    "-DMEMPOOL_LOCK()=mempool_test_lock()"
+    "-DMEMPOOL_UNLOCK()=mempool_test_unlock()"
+    "-DMEMPOOL_ISR_LOCK()=mempool_test_isr_lock()"
+    "-DMEMPOOL_ISR_UNLOCK()=mempool_test_isr_unlock()"
+)
+target_link_libraries(mempool_gtest_mgr_nostats
+    PRIVATE
+        GTest::gtest_main
+)
+
+gtest_discover_tests(mempool_gtest_mgr_nostats)
+
 add_test(NAME mempool_ctest COMMAND mempool_ctest)
 
 # Installation
