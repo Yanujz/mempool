@@ -2,10 +2,18 @@
 #include <stdint.h>
 #include "mempool.h"
 
-#define POOL_BYTES 4096U
+#define BLOCK_SIZE  64U
+#define NUM_BLOCKS  32U
+#define POOL_ALIGN  8U
 
-static uint8_t state_buf[MEMPOOL_STATE_SIZE] __attribute__((aligned(8)));
-static uint8_t pool_buf[POOL_BYTES]          __attribute__((aligned(8)));
+/*
+ * MEMPOOL_POOL_BUFFER_SIZE accounts for guard canaries, bitmap, and tag
+ * overhead so the buffer is always large enough regardless of build flags.
+ */
+static uint8_t state_buf[MEMPOOL_STATE_SIZE]
+    __attribute__((aligned(POOL_ALIGN)));
+static uint8_t pool_buf[MEMPOOL_POOL_BUFFER_SIZE(BLOCK_SIZE, NUM_BLOCKS, POOL_ALIGN)]
+    __attribute__((aligned(POOL_ALIGN)));
 
 int main(void)
 {
@@ -22,7 +30,7 @@ int main(void)
 
     err = mempool_init(state_buf, sizeof(state_buf),
                        pool_buf, sizeof(pool_buf),
-                       64U, 8U, &pool);
+                       BLOCK_SIZE, POOL_ALIGN, &pool);
     if (err != MEMPOOL_OK) {
         printf("mempool_init failed: %s\n", mempool_strerror(err));
         return 1;
