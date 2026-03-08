@@ -61,8 +61,15 @@ if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 endif()
 
+# Core library source files (split from the original monolithic mempool.c)
+set(MEMPOOL_CORE_SRCS
+    src/mempool_core.c
+    src/mempool_diag.c
+    src/mempool_isr.c
+)
+
 # Library
-add_library(mempool STATIC src/mempool.c src/mempool_mgr.c)
+add_library(mempool STATIC ${MEMPOOL_CORE_SRCS} src/mempool_mgr.c)
 target_include_directories(mempool PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -80,7 +87,7 @@ target_compile_definitions(mempool PUBLIC
 
 # C test harness
 add_executable(mempool_ctest
-    src/mempool.c
+    ${MEMPOOL_CORE_SRCS}
     tests/test_mempool.c
 )
 target_include_directories(mempool_ctest PRIVATE include)
@@ -111,7 +118,7 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 add_executable(mempool_gtest
-    src/mempool.c
+    ${MEMPOOL_CORE_SRCS}
     tests/gtest_mempool.cpp
 )
 target_include_directories(mempool_gtest PRIVATE include tests)
@@ -140,7 +147,7 @@ gtest_discover_tests(mempool_gtest)
 
 # Comprehensive test suite with 500+ cases
 add_executable(mempool_gtest_comprehensive
-    src/mempool.c
+    ${MEMPOOL_CORE_SRCS}
     tests/gtest_mempool_comprehensive.cpp
 )
 target_include_directories(mempool_gtest_comprehensive PRIVATE include tests)
@@ -168,7 +175,7 @@ gtest_discover_tests(mempool_gtest_comprehensive)
 
 # Hardening test suite — exercises all new production-grade features
 add_executable(mempool_gtest_hardening
-    src/mempool.c
+    ${MEMPOOL_CORE_SRCS}
     src/mempool_mgr.c
     tests/gtest_mempool_hardening.cpp
 )
@@ -200,7 +207,7 @@ gtest_discover_tests(mempool_gtest_hardening)
 # No-STATS mgr regression build — verifies that mempool_mgr compiles and
 # operates correctly when MEMPOOL_ENABLE_STATS=0 (previously a compile error).
 add_executable(mempool_gtest_mgr_nostats
-    src/mempool.c
+    ${MEMPOOL_CORE_SRCS}
     src/mempool_mgr.c
     tests/gtest_mempool_mgr_nostats.cpp
 )
